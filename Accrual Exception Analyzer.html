@@ -1,0 +1,1039 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Accrual Exception Analyzer</title>
+  <!--
+    APPROACH: SheetJS (reliable xlsx parser, handles any file structure) for
+    reading + analysis.  JSZip opens the ORIGINAL file as a ZIP archive, injects
+    the 4 exception columns directly into the worksheet XML, and leaves every
+    other ZIP entry (styles.xml, sharedStrings.xml, images, drawings, …) byte-
+    for-byte identical.  The output is the original file with 4 columns appended.
+  -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+  <style>
+    /* ── TI Brand Colors ──────────────────────────────────────
+       Navy  #101B3A  |  Yellow  #FFEF00  |  Blue  #326091
+       Cloud #F1F4FA  |  Black   #231F20  |  White #FFFFFF
+    ─────────────────────────────────────────────────────── */
+    :root {
+      --ti-navy:   #101B3A;
+      --ti-yellow: #FFEF00;
+      --ti-blue:   #326091;
+      --ti-cloud:  #F1F4FA;
+      --ti-black:  #231F20;
+      --ti-white:  #FFFFFF;
+      --ti-blue-lt:#EEF3F8;  /* tint of TI Blue for hover states  */
+      --ti-navy-lt:#E8EAF0;  /* tint of TI Navy for subtle fills   */
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: var(--ti-cloud);
+      color: var(--ti-black);
+      min-height: 100vh;
+    }
+
+    /* ── Header ─────────────────────────────────────────── */
+    header {
+      background: var(--ti-navy);
+      color: white;
+      padding: 0 36px;
+      display: flex;
+      align-items: stretch;
+      gap: 0;
+      border-bottom: 4px solid var(--ti-yellow);
+    }
+    .header-logo {
+      display: flex;
+      align-items: center;
+      padding: 16px 24px 16px 0;
+      border-right: 1px solid rgba(255,255,255,0.12);
+      margin-right: 24px;
+      flex-shrink: 0;
+    }
+    /* TI-style mark: navy circle with TI initials + yellow accent ring */
+    .ti-mark {
+      width: 42px; height: 42px;
+      background: var(--ti-yellow);
+      border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0;
+    }
+    .ti-mark span {
+      font-size: 14px; font-weight: 700;
+      color: var(--ti-navy); letter-spacing: -0.5px;
+      font-family: 'IBM Plex Sans', sans-serif;
+    }
+    .header-text { display: flex; flex-direction: column; justify-content: center; padding: 16px 0; }
+    .header-text h1 {
+      font-size: 17px; font-weight: 600; color: white;
+      letter-spacing: 0.1px; line-height: 1.2;
+    }
+    .header-text p {
+      font-size: 11px; color: rgba(255,255,255,0.55);
+      margin-top: 3px; font-weight: 400;
+    }
+    .header-brand {
+      margin-left: auto; display: flex; align-items: center; padding: 16px 0;
+    }
+    .header-brand span {
+      font-size: 10px; font-weight: 500; color: rgba(255,255,255,0.35);
+      letter-spacing: 1.2px; text-transform: uppercase;
+    }
+
+    /* ── Layout ─────────────────────────────────────────── */
+    .container { max-width: 980px; margin: 32px auto; padding: 0 24px 60px; }
+    .upload-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 8px; }
+    @media (max-width: 620px) { .upload-row { grid-template-columns: 1fr; } }
+
+    /* ── Section labels ─────────────────────────────────── */
+    .file-slot { position: relative; }
+    .slot-label {
+      font-size: 10.5px; font-weight: 600; letter-spacing: 1px;
+      text-transform: uppercase; color: var(--ti-blue); margin-bottom: 8px;
+      display: flex; align-items: center; gap: 6px;
+    }
+    .badge-opt {
+      font-size: 9.5px; font-weight: 500;
+      background: var(--ti-navy-lt); color: #6b7a99;
+      padding: 1px 8px; border-radius: 10px;
+      letter-spacing: 0; text-transform: none;
+    }
+
+    /* ── Drop zones ─────────────────────────────────────── */
+    .dz {
+      border: 2px dashed #c8d4e3; border-radius: 8px; background: white;
+      padding: 28px 20px; text-align: center; cursor: pointer;
+      transition: border-color 0.2s, background 0.2s; user-select: none;
+      min-height: 130px; display: flex; flex-direction: column;
+      justify-content: center; align-items: center; gap: 6px;
+      box-shadow: 0 1px 3px rgba(16,27,58,.05);
+    }
+    .dz:hover, .dz.drag { border-color: var(--ti-blue); background: var(--ti-blue-lt); }
+    .dz.loaded {
+      border-color: var(--ti-blue); background: var(--ti-blue-lt);
+      border-style: solid; cursor: default;
+    }
+    .dz .icon { font-size: 26px; }
+    .dz h3 { font-size: 13px; font-weight: 600; color: var(--ti-navy); }
+    .dz p { font-size: 11.5px; color: #8a96a8; }
+    .dz .bl { color: var(--ti-blue); text-decoration: underline; cursor: pointer; }
+    .dz .ln { font-size: 12.5px; color: var(--ti-blue); font-weight: 600; word-break: break-all; padding: 0 8px; }
+    .dz .ls { font-size: 11px; color: var(--ti-blue); opacity: 0.8; }
+    .dz-clr {
+      position: absolute; top: 36px; right: 10px; font-size: 11px;
+      color: #9ca3af; cursor: pointer; padding: 2px 6px; border-radius: 4px; display: none;
+    }
+    .dz-clr:hover { background: var(--ti-navy-lt); color: var(--ti-navy); }
+    input[type="file"] { display: none; }
+
+    /* ── Run row ────────────────────────────────────────── */
+    .run-row { display: flex; justify-content: center; margin-top: 22px; gap: 14px; align-items: center; }
+    #fileHint { font-size: 12px; color: #8a96a8; }
+
+    /* ── Status bar ─────────────────────────────────────── */
+    .sbar {
+      margin-top: 20px; padding: 13px 18px; border-radius: 8px; background: white;
+      border-left: 4px solid var(--ti-blue); font-size: 13px; display: none;
+      align-items: center; gap: 10px;
+      box-shadow: 0 1px 3px rgba(16,27,58,.06);
+    }
+    .sbar.err { border-left-color: #dc2626; }
+    .spinner {
+      width: 15px; height: 15px;
+      border: 2px solid var(--ti-navy-lt);
+      border-top-color: var(--ti-blue);
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite; flex-shrink: 0;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Results header ─────────────────────────────────── */
+    .results { display: none; margin-top: 28px; }
+    .rh {
+      display: flex; justify-content: space-between; align-items: flex-start;
+      margin-bottom: 18px; gap: 16px; flex-wrap: wrap;
+      padding-bottom: 16px;
+      border-bottom: 2px solid var(--ti-yellow);
+    }
+    .rt { font-size: 16px; font-weight: 700; color: var(--ti-navy); }
+    .rs { font-size: 12px; color: #6b7a99; margin-top: 3px; }
+
+    /* ── Summary cards ──────────────────────────────────── */
+    .cards { display: grid; grid-template-columns: repeat(3,1fr); gap: 12px; margin-bottom: 20px; }
+    @media (max-width: 640px) { .cards { grid-template-columns: repeat(2,1fr); } }
+    .card {
+      background: white; border-radius: 8px; padding: 16px 18px;
+      border-top: 4px solid; box-shadow: 0 1px 3px rgba(16,27,58,.07);
+    }
+    /* Total / overview — TI Navy */
+    .ct { border-top-color: var(--ti-navy); }
+    /* Clean — TI Blue */
+    .cc { border-top-color: var(--ti-blue); }
+    /* Exception cards — semantic colors (functional clarity takes priority) */
+    .c1 { border-top-color: #e8a020; }
+    .c2 { border-top-color: #c97a10; }
+    .c3 { border-top-color: #d63b3b; }
+    .c4 { border-top-color: #e06530; }
+    .c5 { border-top-color: #7451c4; }
+    .c6 { border-top-color: #1e6fa8; }
+    .cn { font-size: 30px; font-weight: 700; line-height: 1; margin-bottom: 4px; color: var(--ti-navy); }
+    .cl { font-size: 11px; color: #6b7a99; line-height: 1.4; }
+    .ca { font-size: 11px; color: var(--ti-navy); font-weight: 600; margin-top: 2px; }
+
+    /* ── Exception detail blocks ────────────────────────── */
+    .ebs { display: flex; flex-direction: column; gap: 10px; margin-bottom: 20px; }
+    .eb {
+      background: white; border-radius: 8px; padding: 16px 20px;
+      box-shadow: 0 1px 3px rgba(16,27,58,.07);
+      border-left: 3px solid transparent;
+    }
+    .ebh { display: flex; justify-content: space-between; align-items: center; margin-bottom: 7px; }
+    .eb h3 { font-size: 12.5px; font-weight: 700; letter-spacing: 0.2px; }
+    .ebdg { font-size: 11px; font-weight: 600; padding: 2px 10px; border-radius: 20px; }
+    .eb p { font-size: 12.5px; color: #4b5869; line-height: 1.6; }
+    .eb ul { margin: 5px 0 0 16px; font-size: 12.5px; color: #4b5869; line-height: 1.8; }
+
+    /* ── Download box ───────────────────────────────────── */
+    .dlbox {
+      background: var(--ti-navy); border-radius: 8px; padding: 28px;
+      text-align: center; margin-bottom: 16px;
+    }
+    .dlbox p { font-size: 12px; color: rgba(255,255,255,0.6); margin-top: 10px; line-height: 1.6; }
+    .opill {
+      display: inline-block;
+      background: rgba(255,255,255,0.1);
+      border: 1px solid rgba(255,255,255,0.2);
+      border-radius: 6px;
+      padding: 8px 14px; font-size: 11.5px; color: rgba(255,255,255,0.75); margin-top: 10px;
+    }
+    .opill code { color: var(--ti-yellow); font-weight: 600; }
+
+    /* ── Buttons ────────────────────────────────────────── */
+    .btn {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 10px 24px; border-radius: 6px; font-size: 13px; font-weight: 600;
+      cursor: pointer; border: none;
+      transition: background 0.15s, transform 0.1s;
+      font-family: 'IBM Plex Sans', sans-serif;
+      letter-spacing: 0.1px;
+    }
+    .btn:active { transform: scale(0.98); }
+    .btn:disabled { opacity: 0.38; cursor: not-allowed; }
+    /* Primary — TI Blue */
+    .btnp { background: var(--ti-blue); color: white; }
+    .btnp:hover:not(:disabled) { background: #255079; }
+    /* Secondary / download — TI Yellow with navy text */
+    .btns { background: var(--ti-yellow); color: var(--ti-navy); }
+    .btns:hover { background: #f0e000; }
+    /* Download button inside dark dlbox — same yellow */
+    .dlbox .btns { font-size: 14px; padding: 13px 32px; }
+
+    .reset { display: inline-block; margin-top: 6px; font-size: 12px; color: #8a96a8; cursor: pointer; text-decoration: underline; }
+    .reset:hover { color: var(--ti-navy); }
+  </style>
+</head>
+<body>
+<header>
+  <div class="header-logo">
+    <div class="ti-mark"><span>TI</span></div>
+  </div>
+  <div class="header-text">
+    <h1>Accrual Exception Analyzer</h1>
+    <p>Match failures · status mismatches · date anomalies · duplicates · under-accruals · formatting preserved</p>
+  </div>
+  <div class="header-brand">
+    <span>Transportation Insight</span>
+  </div>
+</header>
+
+<div class="container">
+  <div class="upload-row">
+    <div class="file-slot">
+      <div class="slot-label">Current Month Accrual</div>
+      <div class="dz" id="dz-cur">
+        <span class="icon">🗂️</span><h3>Drop file here</h3>
+        <p>or <span class="bl">browse</span></p>
+        <p style="margin-top:4px;font-size:11px;color:#d1d5db">.xlsx only</p>
+      </div>
+      <div class="dz-clr" id="clr-cur">✕ remove</div>
+    </div>
+    <div class="file-slot">
+      <div class="slot-label">Prior Month Accrual <span class="badge-opt">optional</span></div>
+      <div class="dz" id="dz-pri">
+        <span class="icon">📁</span><h3>Drop file here</h3>
+        <p>or <span class="bl">browse</span></p>
+        <p style="margin-top:4px;font-size:11px;color:#d1d5db">Enables prior-month under-accrual detection</p>
+      </div>
+      <div class="dz-clr" id="clr-pri">✕ remove</div>
+    </div>
+  </div>
+  <input type="file" id="fi-cur" accept=".xlsx">
+  <input type="file" id="fi-pri" accept=".xlsx">
+
+  <div class="run-row">
+    <button class="btn btnp" id="runBtn" disabled onclick="runAnalysis()">▶ Run Analysis</button>
+    <span id="fileHint">Load the current month file to begin</span>
+  </div>
+  <div class="sbar" id="sbar"><div class="spinner" id="spin"></div><span id="stxt"></span></div>
+
+  <div class="results" id="results">
+    <div class="rh">
+      <div><div class="rt" id="rtitle"></div><div class="rs" id="rsub"></div></div>
+      <button class="btn btns" onclick="downloadFile()">⬇ Download Flagged Report</button>
+    </div>
+    <div class="cards" id="cards"></div>
+    <div class="ebs"  id="ebs"></div>
+    <div class="dlbox">
+      <button class="btn btns" onclick="downloadFile()" style="font-size:14px;padding:12px 28px">⬇ Download Flagged Report (.xlsx)</button>
+      <div class="opill">
+        4 columns appended: &nbsp;
+        <code>EXC: Flag</code> &nbsp;·&nbsp; <code>EXC: Type(s)</code> &nbsp;·&nbsp;
+        <code>EXC: Detail</code> &nbsp;·&nbsp; <code>EXC: Suggested Action</code>
+      </div>
+      <p>All original formatting, branding, and cell styles are preserved exactly.<br>
+         Delete the 4 EXC columns before sending to the client.</p>
+    </div>
+    <div style="text-align:center"><span class="reset" id="resetBtn">← Analyze another file</span></div>
+  </div>
+</div>
+
+<script>
+'use strict';
+// ══════════════════════════════════════════════════════════════
+// State
+// loaded[slot] = { wb, ws, name, rowCount, HR (0-based), CM, originalBuffer }
+// ══════════════════════════════════════════════════════════════
+const loaded = { cur: null, pri: null };
+let lastAnalysis = null; // { stats, exceptionRows, excStart, HR, name, originalBuffer }
+
+// ══════════════════════════════════════════════════════════════
+// SheetJS helpers  (0-based row/col)
+// ══════════════════════════════════════════════════════════════
+function cv(ws, r, colName, cm) {
+  const c = cm[colName];
+  if (c === undefined) return null;
+  const cell = ws[XLSX.utils.encode_cell({r, c})];
+  return cell === undefined ? null : (cell.v === undefined ? null : cell.v);
+}
+
+function isBlank(v) { return v === null || v === undefined || String(v).trim() === ''; }
+function str(v)     { return (v === null || v === undefined) ? '' : String(v).trim(); }
+
+function findHeaderRow(ws) {
+  const range = XLSX.utils.decode_range(ws['!ref']);
+  const rMax  = Math.min(range.e.r, range.s.r + 59);
+  for (let r = range.s.r; r <= rMax; r++) {
+    for (let c = range.s.c; c <= Math.min(range.e.c, range.s.c + 119); c++) {
+      const cell = ws[XLSX.utils.encode_cell({r, c})];
+      if (cell && String(cell.v).trim().toLowerCase() === 'tms load status') return r;
+    }
+  }
+  return null;
+}
+
+function buildColMap(ws, hr) {
+  const map = {};
+  const range = XLSX.utils.decode_range(ws['!ref']);
+  for (let c = range.s.c; c <= range.e.c; c++) {
+    const cell = ws[XLSX.utils.encode_cell({r: hr, c})];
+    if (cell && cell.v != null) {
+      const k = String(cell.v).trim();
+      if (k) map[k] = c;
+    }
+  }
+  return map;
+}
+
+// ══════════════════════════════════════════════════════════════
+// Drop zone wiring
+// ══════════════════════════════════════════════════════════════
+function wireDZ(slot) {
+  const dz  = document.getElementById('dz-' + slot);
+  const fi  = document.getElementById('fi-' + slot);
+  const clr = document.getElementById('clr-' + slot);
+  dz.addEventListener('dragover',  e => { e.preventDefault(); if (!dz.classList.contains('loaded')) dz.classList.add('drag'); });
+  dz.addEventListener('dragleave', () => dz.classList.remove('drag'));
+  dz.addEventListener('drop', e => {
+    e.preventDefault(); dz.classList.remove('drag');
+    if (!dz.classList.contains('loaded') && e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0], slot);
+  });
+  dz.addEventListener('click', () => { if (!dz.classList.contains('loaded')) fi.click(); });
+  dz.querySelectorAll('.bl').forEach(el => el.addEventListener('click', e => { e.stopPropagation(); fi.click(); }));
+  fi.addEventListener('change', e => { if (e.target.files[0]) loadFile(e.target.files[0], slot); fi.value = ''; });
+  clr.addEventListener('click', () => clearSlot(slot));
+}
+wireDZ('cur'); wireDZ('pri');
+
+document.getElementById('resetBtn').addEventListener('click', () => {
+  clearSlot('cur'); clearSlot('pri');
+  document.getElementById('results').style.display = 'none';
+  hideStat(); lastAnalysis = null;
+});
+
+async function loadFile(file, slot) {
+  if (!file.name.toLowerCase().endsWith('.xlsx')) { alert('Please use an .xlsx file.'); return; }
+  setDZ(slot, 'loading', file.name);
+  try {
+    const arrayBuffer = await new Promise((res, rej) => {
+      const reader = new FileReader();
+      reader.onload = e => res(e.target.result);
+      reader.onerror = () => rej(new Error('FileReader failed'));
+      reader.readAsArrayBuffer(file);
+    });
+    showStat('Parsing ' + file.name + '…');
+    const data = new Uint8Array(arrayBuffer);
+    const wb   = XLSX.read(data, { type: 'array', cellDates: true, cellStyles: true });
+    const ws   = wb.Sheets[wb.SheetNames[0]];
+    if (!ws) throw new Error('No worksheets found.');
+    const HR = findHeaderRow(ws);
+    if (HR === null) throw new Error('Could not find header row — expected a "TMS Load Status" column.');
+    const CM = buildColMap(ws, HR);
+    if (!CM['Accrue']) throw new Error('Could not find "Accrue" column.');
+    const range    = XLSX.utils.decode_range(ws['!ref']);
+    const rowCount = range.e.r - HR;
+    loaded[slot] = { wb, ws, name: file.name, rowCount, HR, CM, originalBuffer: arrayBuffer };
+    setDZ(slot, 'loaded', file.name, rowCount);
+    hideStat();
+    updateBtn();
+  } catch (err) {
+    setDZ(slot, 'idle', '');
+    hideStat();
+    console.error(err);
+    alert('Could not read file: ' + err.message);
+  }
+}
+
+function clearSlot(slot) {
+  loaded[slot] = null;
+  document.getElementById('fi-' + slot).value = '';
+  setDZ(slot, 'idle', '');
+  updateBtn();
+}
+
+function setDZ(slot, state, name, rows) {
+  const dz  = document.getElementById('dz-' + slot);
+  const clr = document.getElementById('clr-' + slot);
+  const isPri = slot === 'pri';
+  if (state === 'idle') {
+    dz.className = 'dz'; clr.style.display = 'none';
+    dz.innerHTML = isPri
+      ? `<span class="icon">📁</span><h3>Drop file here</h3><p>or <span class="bl">browse</span></p><p style="margin-top:4px;font-size:11px;color:#d1d5db">Enables prior-month under-accrual detection</p>`
+      : `<span class="icon">🗂️</span><h3>Drop file here</h3><p>or <span class="bl">browse</span></p><p style="margin-top:4px;font-size:11px;color:#d1d5db">.xlsx only</p>`;
+    dz.querySelectorAll('.bl').forEach(el => el.addEventListener('click', e => { e.stopPropagation(); document.getElementById('fi-' + slot).click(); }));
+  } else if (state === 'loading') {
+    dz.className = 'dz'; clr.style.display = 'none';
+    dz.innerHTML = `<span class="icon">⏳</span><h3>Loading…</h3><p style="font-size:11px;color:#9ca3af">${name}</p>`;
+  } else if (state === 'loaded') {
+    dz.className = 'dz loaded'; clr.style.display = 'block';
+    dz.innerHTML = `<span class="icon">✅</span><div class="ln">${name}</div><div class="ls">${(rows||0).toLocaleString()} rows loaded</div>`;
+  }
+}
+
+function updateBtn() {
+  const btn  = document.getElementById('runBtn');
+  const hint = document.getElementById('fileHint');
+  btn.disabled = !loaded.cur;
+  hint.textContent = loaded.cur
+    ? (loaded.pri ? '✓ Both files loaded — under-accrual check enabled' : 'Prior month optional — enables under-accrual detection')
+    : 'Load the current month file to begin';
+}
+
+function showStat(msg, type = 'loading') {
+  const bar = document.getElementById('sbar');
+  document.getElementById('stxt').textContent = msg;
+  document.getElementById('spin').style.display = type === 'loading' ? '' : 'none';
+  bar.className = 'sbar' + (type === 'err' ? ' err' : '');
+  bar.style.display = 'flex';
+}
+function hideStat() { document.getElementById('sbar').style.display = 'none'; }
+
+// ══════════════════════════════════════════════════════════════
+// Analysis entry point
+// ══════════════════════════════════════════════════════════════
+function runAnalysis() {
+  document.getElementById('results').style.display = 'none';
+  showStat('Running exception checks on ' + loaded.cur.rowCount.toLocaleString() + ' rows…');
+  setTimeout(() => {
+    try {
+      const { stats, exceptionRows, excStart, rowsToRemove, summaryTable, newSummaryTotals } = analyze();
+      lastAnalysis = { stats, exceptionRows, excStart, rowsToRemove, summaryTable, newSummaryTotals,
+        HR: loaded.cur.HR, name: loaded.cur.name,
+        originalBuffer: loaded.cur.originalBuffer };
+      hideStat();
+      renderResults(stats);
+    } catch (err) {
+      showStat('Error during analysis: ' + err.message, 'err');
+      console.error(err);
+    }
+  }, 60);
+}
+
+// ══════════════════════════════════════════════════════════════
+// Locate the accrual summary table above the header row.
+// Returns { 'Accrue': { excelRow, amountCol, shipmentsCol }, ... } or null.
+// ══════════════════════════════════════════════════════════════
+function findSummaryTable(ws, HR) {
+  const range = XLSX.utils.decode_range(ws['!ref']);
+  let amountCol = -1, shipmentsCol = -1;
+  const labelRows = {};
+
+  for (let r = range.s.r; r < HR; r++) {
+    for (let c = range.s.c; c <= Math.min(range.e.c, range.s.c + 50); c++) {
+      const cell = ws[XLSX.utils.encode_cell({r, c})];
+      if (!cell || cell.v == null) continue;
+      const v  = String(cell.v).trim();
+      const vl = v.toLowerCase();
+      if (vl === 'amount') amountCol = c;
+      if (vl === 'total shipments' || vl === 'shipments') shipmentsCol = c;
+      if (v === 'Accrue' || v === 'Invoiced' || v === 'Invoiced Only') labelRows[v] = r + 1;
+    }
+  }
+
+  if (!Object.keys(labelRows).length || amountCol < 0) return null;
+  const out = {};
+  for (const [name, excelRow] of Object.entries(labelRows))
+    out[name] = { excelRow, amountCol, shipmentsCol };
+  return out;
+}
+
+// ══════════════════════════════════════════════════════════════
+// Core analysis  (synchronous)
+// Returns: { stats, exceptionRows, excStart, rowsToRemove, summaryTable, newSummaryTotals }
+// ══════════════════════════════════════════════════════════════
+function analyze() {
+  const { ws, HR, CM } = loaded.cur;
+  const range      = XLSX.utils.decode_range(ws['!ref']);
+  const totalRows  = range.e.r; // last 0-based row index
+  const get        = (r, col) => cv(ws, r, col, CM);
+  const excStart   = range.e.c + 1;  // 0-based col after last existing col
+
+  const summaryTable    = findSummaryTable(ws, HR);
+  const newSummaryTotals = {
+    'Accrue':       { amount: 0, shipments: 0 },
+    'Invoiced':     { amount: 0, shipments: 0 },
+    'Invoiced Only':{ amount: 0, shipments: 0 }
+  };
+
+  // ── Derive report month from max TI Invoice Date on Invoiced rows ──
+  let reportYear = null, reportMonth = null;
+  for (let r = HR+1; r <= totalRows; r++) {
+    if (str(get(r,'Accrue')) !== 'Invoiced') continue;
+    const d = get(r,'TI Invoice Date');
+    if (!(d instanceof Date)) continue;
+    if (reportYear===null || d.getFullYear()>reportYear ||
+        (d.getFullYear()===reportYear && d.getMonth()>reportMonth)) {
+      reportYear  = d.getFullYear();
+      reportMonth = d.getMonth();
+    }
+  }
+  const reportMonthLabel = reportYear!==null
+    ? new Date(reportYear,reportMonth,1).toLocaleString('en-US',{month:'long',year:'numeric'})
+    : 'unknown month';
+
+  // reportDate: the date the accrual was pulled — used as the reference for all
+  // date-based checks (pickup/delivery comparisons).  Reports are pulled on the
+  // 1st of the month, so use the first day of the derived report month.
+  // Falls back to today only if we couldn't determine the report month.
+  const reportDate = reportYear !== null
+    ? new Date(reportYear, reportMonth, 1)
+    : (() => { const d = new Date(); d.setHours(0,0,0,0); return d; })();
+
+  // ══ PASS 1 ── lookup structures ══
+  // invOnlyRefs: maps TI BOL *and* TI PO from Invoiced Only rows → {invoice, row, matchedField}
+  // Used by FAILED_MATCH (EXC2) to catch cases where billing software placed the
+  // reference number in the wrong field.  TI PO is intentionally excluded from
+  // dupMaps because a PO number legitimately spans multiple shipments.
+  const invOnlyRefs  = {};
+  const invRowsByInv = {};
+  const dupMaps = { tms_pro:{}, tms_ref:{}, ti_bol:{} };
+
+  for (let r = HR+1; r <= totalRows; r++) {
+    const accrue = str(get(r,'Accrue'));
+    const tiInv  = get(r,'TI Invoice Number');
+    const tiBOL  = str(get(r,'TI BOL Number'));
+    const tiPO   = str(get(r,'TI PO Number'));
+    const tmsPro = str(get(r,'TMS Pro Number'));
+    const tmsRef = str(get(r,'TMS Primary Reference Value'));
+    const amt    = get(r,'Amount');
+    const ships  = get(r,'Shipments');
+    const balDue = str(get(r,'Bal Due or Adjustment'));
+
+    if (accrue==='Invoiced Only') {
+      if (!isBlank(tiBOL)) invOnlyRefs[tiBOL] = { invoice: tiInv, row: r, matchedField: 'TI BOL' };
+      if (!isBlank(tiPO))  invOnlyRefs[tiPO]  = { invoice: tiInv, row: r, matchedField: 'TI PO' };
+    }
+
+    if (tiInv!=null) {
+      const k=str(tiInv);
+      if (!invRowsByInv[k]) invRowsByInv[k]=[];
+      invRowsByInv[k].push(r);
+    }
+
+    const entry={row:r, invoice:tiInv!=null?str(tiInv):null, amount:amt, shipments:ships, balDue, accrue};
+    const addM=(map,key)=>{ if(!key)return; if(!map[key])map[key]=[]; map[key].push(entry); };
+    addM(dupMaps.tms_pro, tmsPro);
+    addM(dupMaps.tms_ref, tmsRef);
+    addM(dupMaps.ti_bol,  tiBOL);
+    // TI PO intentionally excluded: a PO spans multiple legitimate shipments
+  }
+
+  const SEV    = {TRUE_DUPLICATE:3, POSSIBLE_DUPLICATE:2, MULTI_INVOICE:1};
+  const dupInfo = {};
+  function processDupMap(map, fieldName) {
+    for (const [val,entries] of Object.entries(map)) {
+      if (entries.length<2) continue;
+      // If any row in the group has a $0 amount it is an adjustment —
+      // the whole group is not a billable duplicate concern.
+      if (entries.some(e=>e.amount!=null&&Number(e.amount)===0)) continue;
+      for (const entry of entries) {
+        // Bal Due / Adjustment rows are legitimate secondary charges —
+        // exclude from duplicate flagging entirely; UNDER_ACCRUAL still applies.
+        if (entry.balDue==='Bal Due or Adjustment') continue;
+        const peers   = entries.filter(e=>e.row!==entry.row);
+        const sameInv = peers.some(p=>p.invoice&&p.invoice===entry.invoice);
+        const sameAmt = peers.some(p=>p.amount!=null&&entry.amount!=null&&
+          Math.abs(Number(p.amount)-Number(entry.amount))<0.01&&p.invoice!==entry.invoice);
+        let subtype,detail,action;
+        if (entry.shipments===0) {
+          subtype='MULTI_INVOICE';
+          detail=`${fieldName} "${val}" — Shipments=0 row (${entries.length} rows share this reference)`;
+          action='Verify as secondary charge (accessorial) — not a true billing duplicate';
+        } else if (sameInv) {
+          subtype='TRUE_DUPLICATE';
+          detail=`${fieldName} "${val}" billed on the same invoice more than once (Invoice #${entry.invoice}, ${entries.length} rows)`;
+          action='Review and void the duplicate invoice entry';
+        } else if (sameAmt) {
+          subtype='POSSIBLE_DUPLICATE';
+          detail=`${fieldName} "${val}" appears ${entries.length}× with the same amount ($${fmtAmt(entry.amount)}) on different invoices`;
+          action='Verify whether this is a duplicate charge or a separate legitimate invoice';
+        } else {
+          subtype='MULTI_INVOICE';
+          detail=`${fieldName} "${val}" has ${entries.length} invoices with differing amounts — may be accessorial or balance due`;
+          action='Confirm all charges are legitimate (accessorial, balance due, etc.)';
+        }
+        const ex=dupInfo[entry.row];
+        if (!ex||SEV[subtype]>SEV[ex.subtype]) dupInfo[entry.row]={subtype,detail,action};
+      }
+    }
+  }
+  processDupMap(dupMaps.tms_pro,'TMS PRO');
+  processDupMap(dupMaps.tms_ref,'TMS Primary Reference');
+  processDupMap(dupMaps.ti_bol,'TI BOL');
+
+  // ══ PASS 2 ── prior month set ══
+  let priorRefs = null;
+  if (loaded.pri) {
+    priorRefs = new Set();
+    const { ws:pw, HR:pHR, CM:pCM } = loaded.pri;
+    const pr = XLSX.utils.decode_range(pw['!ref']);
+    for (let r = pHR+1; r <= pr.e.r; r++) {
+      if (str(cv(pw,r,'Accrue',pCM))!=='Accrue') continue;
+      [str(cv(pw,r,'TMS Primary Reference Value',pCM)),
+       str(cv(pw,r,'TMS Pro Number',pCM))
+      ].forEach(v=>{ if(v) priorRefs.add(v); });
+    }
+  }
+
+  // ══ PASS 3 ── EXC1 pairing ══
+  const pairedInvoicedRows = new Set();
+  for (let r = HR+1; r <= totalRows; r++) {
+    if (str(get(r,'Accrue'))!=='Accrue') continue;
+    const tiInv = get(r,'TI Invoice Number');
+    if (tiInv==null) continue;
+    (invRowsByInv[str(tiInv)]||[]).forEach(pr=>{
+      if (pr!==r && str(cv(ws,pr,'Accrue',CM))==='Invoiced') pairedInvoicedRows.add(pr);
+    });
+  }
+
+  // ══ PASS 4 ── evaluate ══
+  const stats={
+    total:0, clean:0, removed:0,
+    exc1_ai:0, exc1_paired:0, exc2_fm:0,
+    exc3_si:0, exc3_missing_tms:0, exc4_cancel:0, exc4_date:0,
+    dup_true:0, dup_poss:0, dup_multi:0, under:0, under_amt:0
+  };
+  const PRE_TRANSIT = new Set(['BOOKED','PENDING','RATED','TENDER EXPIRED','CANCELLED']);
+  // Accruing rows with TMS status outside the valid set are removed from the
+  // output entirely — they are not valid accruals and need no exception flag.
+  const ACCRUING_KEEP = new Set(['BOOKED','IN TRANSIT','DELIVERED']);
+  const exceptionRows = {};
+  const rowsToRemove  = new Set(); // Excel 1-based row numbers to strip from output
+
+  for (let r = HR+1; r <= totalRows; r++) {
+    const tmsStatus  = str(get(r,'TMS Load Status')).toUpperCase();
+    const tmsPickup  = get(r,'TMS Pickup Date');
+    const tmsDlv     = get(r,'TMS Delivery Date');
+    const tmsRef     = str(get(r,'TMS Primary Reference Value'));
+    const tiInv      = get(r,'TI Invoice Number');
+    const tiInvDate  = get(r,'TI Invoice Date');
+    const tiPickup   = get(r,'TI Pickup Date');
+    const accrue     = str(get(r,'Accrue'));
+    const amount     = get(r,'Amount');
+    const tiBOL      = str(get(r,'TI BOL Number'));
+    const tiPO       = str(get(r,'TI PO Number'));
+    const tiPro      = str(get(r,'TI Pro Number'));
+    const balDue     = str(get(r,'Bal Due or Adjustment'));
+    const isBalDueRow= balDue==='Bal Due or Adjustment';
+    const ships      = get(r,'Shipments');
+
+    // Remove Accrue rows whose TMS status is not Booked, In Transit, or Delivered
+    if (accrue==='Accrue' && !ACCRUING_KEEP.has(tmsStatus)) {
+      rowsToRemove.add(r+1);
+      stats.removed++;
+      continue;
+    }
+
+    // Accumulate summary table totals for kept rows.
+    // Amount: sum the Amount column.
+    // Shipments: count rows (Accruing rows have no invoice Shipments value yet).
+    if (newSummaryTotals[accrue]) {
+      newSummaryTotals[accrue].amount    += amount!=null ? Number(amount) : 0;
+      newSummaryTotals[accrue].shipments += 1;
+    }
+
+    stats.total++;
+    const exc = [];
+
+    if (accrue==='Accrue' && tiInv!=null && !isBlank(tiInv)) {
+      const invKey    = str(tiInv);
+      const paired    = (invRowsByInv[invKey]||[]).filter(pr=>pr!==r&&str(cv(ws,pr,'Accrue',CM))==='Invoiced');
+      exc.push({type:'ACCRUING_INVOICED',
+        detail:`Row is Accruing but TI Invoice #${str(tiInv)} is already populated — file match partially completed.`
+              +(paired.length>0?` ${paired.length} paired Invoiced row(s) on the same invoice.`:''),
+        action:'Verify in billing platform; consolidate Accruing + Invoiced rows into a single Invoiced line'});
+      stats.exc1_ai++;
+    }
+
+    if (pairedInvoicedRows.has(r)) {
+      exc.push({type:'ACCRUING_INVOICED_PAIR',
+        detail:'This Invoiced row has a corresponding Accruing row on the same invoice — same shipment represented twice',
+        action:'Merge with the corresponding Accruing row into a single Invoiced line'});
+      stats.exc1_paired++;
+    }
+
+    if (accrue==='Accrue' && !isBlank(tmsRef)) {
+      const match = invOnlyRefs[tmsRef];
+      if (match) {
+        exc.push({type:'FAILED_MATCH',
+          detail:`TMS Primary Reference "${tmsRef}" matches ${match.matchedField} on an Invoiced Only row (Invoice #${str(match.invoice)}) — invoice exists but file match did not link the TMS record`,
+          action:`Manually link TMS record to Invoice #${str(match.invoice)}; reclassify from Accruing to Invoiced`});
+        stats.exc2_fm++;
+      }
+    }
+
+    if (accrue==='Invoiced' && tmsStatus && tmsStatus!=='DELIVERED') {
+      exc.push({type:'STATUS_INVOICE_MISMATCH',
+        detail:`Invoice #${str(tiInv)} confirms delivery but TMS status is still ${tmsStatus}`,
+        action:'Update TMS status to DELIVERED'});
+      stats.exc3_si++;
+    }
+
+    if (accrue==='Invoiced' && isBlank(get(r,'TMS Load Status'))) {
+      exc.push({type:'INVOICED_MISSING_TMS',
+        detail:`Row is Invoiced but all TMS fields are blank — no Load Status, no Reference, no Pickup Date (TI BOL: "${tiBOL}", Invoice: #${str(tiInv)})`,
+        action:'Locate the TMS record to identify why it is not appearing in the report — a physical match did occur and this row should remain Invoiced; investigate the TMS record for data or sync issues'});
+      stats.exc3_missing_tms++;
+    }
+
+    if (tmsStatus==='CANCELLED' && accrue==='Accrue') {
+      exc.push({type:'STATUS_DATE_MISMATCH',
+        detail:'Shipment is CANCELLED in TMS but remains in Accrue status — cancelled shipments should not carry an accrual',
+        action:'Remove from accrual or void the cancelled load in TMS'});
+      stats.exc4_cancel++;
+    }
+
+    if (PRE_TRANSIT.has(tmsStatus) && tmsPickup instanceof Date && tmsPickup<reportDate
+        && !(tmsStatus==='CANCELLED' && accrue==='Accrue')) {
+      const daysAgo=Math.floor((reportDate-tmsPickup)/86400000);
+      exc.push({type:'STATUS_DATE_MISMATCH',
+        detail:`TMS Pickup Date was ${fmtDate(tmsPickup)} (${daysAgo}d before report date ${fmtDate(reportDate)}) but status remains ${tmsStatus} — should be at minimum IN TRANSIT`,
+        action:'Verify shipment movement and update TMS status'});
+      stats.exc4_date++;
+    }
+
+    if (tmsStatus && tmsStatus!=='DELIVERED' && tmsDlv instanceof Date && tmsDlv<reportDate) {
+      const daysAgo=Math.floor((reportDate-tmsDlv)/86400000);
+      exc.push({type:'STATUS_DATE_MISMATCH',
+        detail:`Delivery was scheduled ${fmtDate(tmsDlv)} (${daysAgo}d before report date ${fmtDate(reportDate)}) but status remains ${tmsStatus}`,
+        action:'Confirm delivery and update TMS status to DELIVERED'});
+      stats.exc4_date++;
+    }
+
+    if (dupInfo[r]) {
+      const d=dupInfo[r];
+      exc.push({type:d.subtype,detail:d.detail,action:d.action});
+      if (d.subtype==='TRUE_DUPLICATE')          stats.dup_true++;
+      else if (d.subtype==='POSSIBLE_DUPLICATE') stats.dup_poss++;
+      else                                       stats.dup_multi++;
+    }
+
+    const isReportMonthInv = reportYear!==null && tiInvDate instanceof Date &&
+      tiInvDate.getFullYear()===reportYear && tiInvDate.getMonth()===reportMonth;
+    const pickupPriorMonth = tiPickup instanceof Date && (
+      tiPickup.getFullYear()<reportYear ||
+      (tiPickup.getFullYear()===reportYear && tiPickup.getMonth()<reportMonth)
+    );
+    if (priorRefs!==null && (accrue==='Invoiced'||isBalDueRow) && isReportMonthInv && pickupPriorMonth) {
+      const ids=[tiBOL,tiPO,tiPro].filter(v=>v);
+      if (!ids.some(v=>priorRefs.has(v))) {
+        exc.push({type:'UNDER_ACCRUAL',
+          detail:`Invoiced in ${reportMonthLabel} but picked up ${fmtDate(tiPickup)} (prior month) — no matching TMS Primary Reference or TMS Pro Number found as Accruing in the prior month file (checked TI BOL: "${tiBOL}", TI PO: "${tiPO}", TI PRO: "${tiPro}")`,
+          action:'Record as prior-period under-accrual; adjust prior month financials if material'});
+        stats.under++;
+        stats.under_amt += amount!=null?Number(amount):0;
+      }
+    }
+
+    if (exc.length>0) {
+      // Key by Excel row number (1-based = r+1 for SheetJS 0-based r)
+      exceptionRows[r+1] = {
+        flag:   '⚠ EXCEPTION',
+        types:  exc.map(e=>e.type).join(' | '),
+        detail: exc.map(e=>e.detail).join(' | '),
+        action: exc.map(e=>e.action).join(' | ')
+      };
+    } else {
+      stats.clean++;
+    }
+  }
+
+  return { stats, exceptionRows, excStart, rowsToRemove, summaryTable, newSummaryTotals };
+}
+
+// ══════════════════════════════════════════════════════════════
+// Render results
+// ══════════════════════════════════════════════════════════════
+function renderResults(stats) {
+  const hasPrior  = !!loaded.pri;
+  const exc1Total = stats.exc1_ai + stats.exc1_paired;
+  const dupTotal  = stats.dup_true + stats.dup_poss + stats.dup_multi;
+  const exc4Total = stats.exc4_cancel + stats.exc4_date;
+  const excRows   = stats.total - stats.clean;
+  const pct       = stats.total>0 ? Math.round(excRows/stats.total*100) : 0;
+
+  document.getElementById('rtitle').textContent = loaded.cur.name + ' — ' + N(excRows) + ' exception row' + (excRows!==1?'s':'') + ' found';
+  document.getElementById('rsub').textContent   = N(stats.total) + ' rows · ' + pct + '% flagged · ' + N(stats.clean) + ' clean'
+    + (stats.removed>0 ? ' · ' + N(stats.removed) + ' invalid-status Accrue rows removed' : '');
+
+  const cards=[
+    {cls:'ct',cnt:N(stats.total),            lbl:'Total Rows (after removal)'},
+    {cls:'cc',cnt:N(stats.clean),            lbl:'Clean — No Exceptions'},
+    {cls:'c1',cnt:N(exc1Total),              lbl:'Accruing / Match Issues'},
+    {cls:'c2',cnt:N(stats.exc2_fm),          lbl:'Failed File Match'},
+    {cls:'c3',cnt:N(stats.exc3_si),          lbl:'Invoiced / Non-DELIVERED Status'},
+    {cls:'c3',cnt:N(stats.exc3_missing_tms), lbl:'Invoiced / No TMS Data'},
+    {cls:'c4',cnt:N(exc4Total),              lbl:'Status / Date Mismatch'},
+    {cls:'c5',cnt:N(dupTotal),               lbl:'Duplicate Reference Rows'},
+  ];
+  if (hasPrior) cards.push({cls:'c6',cnt:N(stats.under),lbl:'Prior-Month Under-Accruals',
+    amt:stats.under>0?'$'+fmtAmt(stats.under_amt)+' exposure':null});
+
+  document.getElementById('cards').innerHTML = cards.map(c=>
+    `<div class="card ${c.cls}"><div class="cn">${c.cnt}</div><div class="cl">${c.lbl}</div>${c.amt?`<div class="ca">${c.amt}</div>`:''}</div>`
+  ).join('');
+
+  const blocks=[];
+  if (exc1Total>0) blocks.push({color:'#f59e0b',title:'ACCRUING_INVOICED',cnt:exc1Total,
+    body:(stats.exc1_ai>0?`<strong>${N(stats.exc1_ai)} Accruing</strong> row${P(stats.exc1_ai)} with TI Invoice data already populated. `:'')+
+         (stats.exc1_paired>0?`<strong>${N(stats.exc1_paired)} Invoiced</strong> row${P(stats.exc1_paired)} identified as the partner line to those Accruing rows. Together they represent the same shipment.`:'')});
+  if (stats.exc2_fm>0) blocks.push({color:'#d97706',title:'FAILED_MATCH',cnt:stats.exc2_fm,
+    body:`${N(stats.exc2_fm)} Accruing row${P(stats.exc2_fm)} whose TMS Primary Reference Value matches a TI BOL Number on an Invoiced Only row. The invoice was processed but the file match never linked the TMS record.`});
+  if (stats.exc3_si>0) blocks.push({color:'#ef4444',title:'STATUS_INVOICE_MISMATCH',cnt:stats.exc3_si,
+    body:`${N(stats.exc3_si)} row${P(stats.exc3_si)} marked Invoiced but TMS status has not progressed to DELIVERED. Since an invoice = signed BOL = proof of delivery, these TMS records are stale.`});
+  if (stats.exc3_missing_tms>0) blocks.push({color:'#dc2626',title:'INVOICED_MISSING_TMS',cnt:stats.exc3_missing_tms,
+    body:`${N(stats.exc3_missing_tms)} row${P(stats.exc3_missing_tms)} categorized as Invoiced but all TMS fields are blank. These have billing data but no TMS counterpart.`});
+  if (exc4Total>0) {
+    const parts=[];
+    if (stats.exc4_cancel>0) parts.push(`<strong>${N(stats.exc4_cancel)} Cancelled + Accruing</strong> — CANCELLED in TMS but still accruing.`);
+    if (stats.exc4_date>0)   parts.push(`<strong>${N(stats.exc4_date)} date mismatches</strong> — past pickup/delivery dates in non-progressed statuses.`);
+    blocks.push({color:'#f97316',title:'STATUS_DATE_MISMATCH',cnt:exc4Total,body:parts.join(' ')});
+  }
+  if (dupTotal>0) blocks.push({color:'#8b5cf6',title:'DUPLICATE / MULTI-INVOICE REFERENCE',cnt:dupTotal,
+    body:`${N(dupTotal)} row${P(dupTotal)} share a reference field (TMS Pro, TMS Primary Ref, TI BOL, or TI PO) with at least one other row:`,
+    bullets:[
+      stats.dup_true>0?`<strong>${N(stats.dup_true)} True Duplicate</strong> — identical invoice number billed more than once`:null,
+      stats.dup_poss>0?`<strong>${N(stats.dup_poss)} Possible Duplicate</strong> — same amount on different invoice numbers`:null,
+      stats.dup_multi>0?`<strong>${N(stats.dup_multi)} Multi-Invoice</strong> — differing amounts or Shipments=0 / Bal Due rows`:null
+    ].filter(Boolean)});
+  if (hasPrior) blocks.push({color:stats.under>0?'#0ea5e9':'#22c55e',title:'UNDER_ACCRUAL — Prior Month',cnt:stats.under,
+    body:stats.under>0
+      ?`${N(stats.under)} row${P(stats.under)} invoiced in <strong>the current report month</strong> with a <strong>TI Pickup Date in a prior month</strong> where no matching TMS record was found as Accruing in the prior month file. These represent <strong>$${fmtAmt(stats.under_amt)}</strong> in unaccrued freight costs.`
+      :'No prior-month under-accruals detected.'});
+  if (blocks.length===0) blocks.push({color:'#22c55e',title:'✓ No exceptions found',cnt:0,body:`All ${N(stats.total)} rows passed every check.`});
+
+  document.getElementById('ebs').innerHTML = blocks.map(b=>`
+    <div class="eb">
+      <div class="ebh">
+        <h3 style="color:${b.color}">${b.title}</h3>
+        ${b.cnt>0?`<span class="ebdg" style="background:${b.color}22;color:${b.color}">${N(b.cnt)} rows</span>`:`<span class="ebdg" style="background:#dcfce7;color:#16a34a">✓ None</span>`}
+      </div>
+      <p>${b.body}</p>
+      ${b.bullets?'<ul>'+b.bullets.map(li=>`<li>${li}</li>`).join('')+'</ul>':''}
+    </div>`).join('');
+
+  document.getElementById('results').style.display='block';
+}
+
+// ══════════════════════════════════════════════════════════════
+// Download: JSZip opens original file, injects cells into
+// worksheet XML, keeps ALL other files byte-for-byte identical
+// ══════════════════════════════════════════════════════════════
+async function downloadFile() {
+  if (!lastAnalysis) return;
+  try {
+    showStat('Building output file (preserving all formatting)…');
+    const { exceptionRows, excStart, HR, name, originalBuffer, rowsToRemove, summaryTable, newSummaryTotals } = lastAnalysis;
+    const headerExcelRow = HR + 1; // 1-based Excel row of the header
+
+    // Open original as ZIP
+    const zip = await JSZip.loadAsync(originalBuffer);
+
+    // Locate worksheet via workbook relationships (handles capital-S filenames)
+    const relsXml = await zip.file('xl/_rels/workbook.xml.rels').async('text');
+    const wsMatch = relsXml.match(/Type="[^"]*\/worksheet"[^>]*Target="([^"]+)"/);
+    const wsRelPath = wsMatch ? wsMatch[1] : 'worksheets/sheet1.xml';
+    const wsPath    = 'xl/' + wsRelPath;
+
+    const wsXml = await zip.file(wsPath).async('text');
+    const modXml = injectExceptionCells(wsXml, headerExcelRow, excStart, exceptionRows, rowsToRemove, summaryTable, newSummaryTotals);
+    zip.file(wsPath, modXml);
+
+    const blob = await zip.generateAsync({ type:'blob', compression:'DEFLATE', compressionOptions:{level:6} });
+    hideStat();
+    const url = URL.createObjectURL(blob);
+    const a   = document.createElement('a');
+    a.href = url;
+    a.download = name.replace(/\.xlsx$/i,'') + ' — Exceptions Flagged.xlsx';
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    hideStat();
+    console.error(err);
+    alert('Download failed: ' + err.message);
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+// XML injection: add exception cells to worksheet XML
+// excStart is 0-based column index of first new column
+// ══════════════════════════════════════════════════════════════
+function injectExceptionCells(xml, headerExcelRow, excStart, exceptionRows, rowsToRemove, summaryTable, newSummaryTotals) {
+  const lastNewColLetter = colLetter(excStart + 4);
+
+  // Extend dimension ref to cover new exception columns
+  xml = xml.replace(/(<dimension\s+ref="[A-Z]+\d+:)[A-Z]+(\d+"[^/]*\/>)/,
+    `$1${lastNewColLetter}$2`);
+
+  const parts  = xml.split('</row>');
+  const result = new Array(parts.length);
+  let removedSoFar = 0; // tracks how many rows have been removed, for renumbering
+
+  // Build a fast lookup: original excelRow → summaryTable entry
+  const summaryByRow = {};
+  if (summaryTable) {
+    for (const [accrueType, info] of Object.entries(summaryTable))
+      summaryByRow[info.excelRow] = { accrueType, info };
+  }
+
+  for (let i = 0; i < parts.length - 1; i++) {
+    let part = parts[i];
+    const m  = part.match(/<row[^>]*\sr="(\d+)"/);
+    if (!m) { result[i] = part + '</row>'; continue; }
+
+    const rn = parseInt(m[1], 10);
+
+    // Drop removed rows — no gap, subsequent rows renumber to fill
+    if (rowsToRemove && rowsToRemove.has(rn)) {
+      result[i] = '';
+      removedSoFar++;
+      continue;
+    }
+
+    // Renumber this row and all its cells to close gaps from removed rows
+    const newRn = rn - removedSoFar;
+    if (newRn !== rn) {
+      // Update <row ... r="N" ...>
+      part = part.replace(/(<row\b[^>]*?\sr=")(\d+)(")/g, `$1${newRn}$3`);
+      // Update all cell r="XYZ123" refs within this row
+      part = part.replace(/\br="([A-Z]+)\d+"/g, (_, cols) => `r="${cols}${newRn}"`);
+    }
+
+    let newCells = '';
+
+    // Patch summary table cells with recalculated totals
+    if (summaryByRow[rn] && newSummaryTotals) {
+      const { accrueType, info } = summaryByRow[rn];
+      const totals = newSummaryTotals[accrueType];
+      if (totals) {
+        if (info.amountCol >= 0) {
+          const amtRef = colLetter(info.amountCol + 1) + newRn;
+          part = part.replace(
+            new RegExp(`(<c\\b[^>]*?\\sr="${amtRef}"[^>]*>(?:<f>[^<]*</f>)?)<v>[^<]*</v>`),
+            `$1<v>${totals.amount.toFixed(2)}</v>`
+          );
+        }
+        if (info.shipmentsCol >= 0) {
+          const shipRef = colLetter(info.shipmentsCol + 1) + newRn;
+          part = part.replace(
+            new RegExp(`(<c\\b[^>]*?\\sr="${shipRef}"[^>]*>(?:<f>[^<]*</f>)?)<v>[^<]*</v>`),
+            `$1<v>${Math.round(totals.shipments)}</v>`
+          );
+        }
+      }
+    }
+
+    // Append exception header or exception flag cells
+    if (rn === headerExcelRow) {
+      const headers = ['EXC: Flag','EXC: Type(s)','EXC: Detail','EXC: Suggested Action'];
+      newCells = headers.map((h, j) =>
+        `<c r="${colLetter(excStart+1+j)}${newRn}" t="str"><v>${xesc(h)}</v></c>`
+      ).join('');
+    } else if (exceptionRows[rn]) {
+      const e = exceptionRows[rn];
+      newCells = [e.flag, e.types, e.detail, e.action].map((v, j) =>
+        `<c r="${colLetter(excStart+1+j)}${newRn}" t="str"><v>${xesc(v)}</v></c>`
+      ).join('');
+    }
+
+    result[i] = part + newCells + '</row>';
+  }
+  result[parts.length - 1] = parts[parts.length - 1];
+  return result.join('');
+}
+
+// Convert 1-based column number to Excel column letters  (1→A, 26→Z, 27→AA …)
+function colLetter(n) {
+  let s = '';
+  while (n > 0) { const r=(n-1)%26; s=String.fromCharCode(65+r)+s; n=Math.floor((n-1)/26); }
+  return s;
+}
+
+// XML-escape special characters in cell string values
+function xesc(s) {
+  return String(s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&apos;');
+}
+
+// ══════════════════════════════════════════════════════════════
+// Formatting helpers
+// ══════════════════════════════════════════════════════════════
+const N = v => Number(v).toLocaleString();
+const P = v => v!==1?'s':'';
+function fmtDate(d) {
+  if (!(d instanceof Date)) return String(d);
+  return d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
+}
+function fmtAmt(v) {
+  return Number(v).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+}
+</script>
+</body>
+</html>
