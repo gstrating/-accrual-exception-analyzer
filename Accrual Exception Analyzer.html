@@ -1,0 +1,1951 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Accrual Exception Analyzer</title>
+  <!--
+    APPROACH: SheetJS (reliable xlsx parser, handles any file structure) for
+    reading + analysis.  JSZip opens the ORIGINAL file as a ZIP archive, injects
+    the 4 exception columns directly into the worksheet XML, and leaves every
+    other ZIP entry (styles.xml, sharedStrings.xml, images, drawings, …) byte-
+    for-byte identical.  The output is the original file with 4 columns appended.
+  -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+  <style>
+    /* ── TI Brand Colors ──────────────────────────────────────
+       Navy  #101B3A  |  Yellow  #FFEF00  |  Blue  #326091
+       Cloud #F1F4FA  |  Black   #231F20  |  White #FFFFFF
+    ─────────────────────────────────────────────────────── */
+    :root {
+      --ti-navy:   #101B3A;
+      --ti-yellow: #FFEF00;
+      --ti-blue:   #326091;
+      --ti-cloud:  #F1F4FA;
+      --ti-black:  #231F20;
+      --ti-white:  #FFFFFF;
+      --ti-blue-lt:#EEF3F8;  /* tint of TI Blue for hover states  */
+      --ti-navy-lt:#E8EAF0;  /* tint of TI Navy for subtle fills   */
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: var(--ti-cloud);
+      color: var(--ti-black);
+      min-height: 100vh;
+    }
+
+    /* ── Header ─────────────────────────────────────────── */
+    header {
+      background: var(--ti-navy);
+      color: white;
+      padding: 0 36px;
+      display: flex;
+      align-items: stretch;
+      gap: 0;
+      border-bottom: 4px solid var(--ti-yellow);
+    }
+    .header-logo {
+      display: flex;
+      align-items: center;
+      padding: 16px 24px 16px 0;
+      border-right: 1px solid rgba(255,255,255,0.12);
+      margin-right: 24px;
+      flex-shrink: 0;
+    }
+    /* TI-style mark: navy circle with TI initials + yellow accent ring */
+    .ti-mark {
+      width: 42px; height: 42px;
+      background: var(--ti-yellow);
+      border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0;
+    }
+    .ti-mark span {
+      font-size: 14px; font-weight: 700;
+      color: var(--ti-navy); letter-spacing: -0.5px;
+      font-family: 'IBM Plex Sans', sans-serif;
+    }
+    .header-text { display: flex; flex-direction: column; justify-content: center; padding: 16px 0; }
+    .header-text h1 {
+      font-size: 17px; font-weight: 600; color: white;
+      letter-spacing: 0.1px; line-height: 1.2;
+    }
+    .header-text p {
+      font-size: 11px; color: rgba(255,255,255,0.55);
+      margin-top: 3px; font-weight: 400;
+    }
+    .header-brand {
+      margin-left: auto; display: flex; align-items: center; padding: 16px 0;
+    }
+    .header-brand span {
+      font-size: 10px; font-weight: 500; color: rgba(255,255,255,0.35);
+      letter-spacing: 1.2px; text-transform: uppercase;
+    }
+
+    /* ── Layout ─────────────────────────────────────────── */
+    .container { max-width: 980px; margin: 32px auto; padding: 0 24px 60px; }
+    .upload-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 8px; }
+    @media (max-width: 620px) { .upload-row { grid-template-columns: 1fr; } }
+
+    /* ── Section labels ─────────────────────────────────── */
+    .file-slot { position: relative; }
+    .slot-label {
+      font-size: 10.5px; font-weight: 600; letter-spacing: 1px;
+      text-transform: uppercase; color: var(--ti-blue); margin-bottom: 8px;
+      display: flex; align-items: center; gap: 6px;
+    }
+    .badge-opt {
+      font-size: 9.5px; font-weight: 500;
+      background: var(--ti-navy-lt); color: #6b7a99;
+      padding: 1px 8px; border-radius: 10px;
+      letter-spacing: 0; text-transform: none;
+    }
+
+    /* ── Drop zones ─────────────────────────────────────── */
+    .dz {
+      border: 2px dashed #c8d4e3; border-radius: 8px; background: white;
+      padding: 28px 20px; text-align: center; cursor: pointer;
+      transition: border-color 0.2s, background 0.2s; user-select: none;
+      min-height: 130px; display: flex; flex-direction: column;
+      justify-content: center; align-items: center; gap: 6px;
+      box-shadow: 0 1px 3px rgba(16,27,58,.05);
+    }
+    .dz:hover, .dz.drag { border-color: var(--ti-blue); background: var(--ti-blue-lt); }
+    .dz.loaded {
+      border-color: var(--ti-blue); background: var(--ti-blue-lt);
+      border-style: solid; cursor: default;
+    }
+    .dz .icon { font-size: 26px; }
+    .dz h3 { font-size: 13px; font-weight: 600; color: var(--ti-navy); }
+    .dz p { font-size: 11.5px; color: #8a96a8; }
+    .dz .bl { color: var(--ti-blue); text-decoration: underline; cursor: pointer; }
+    .dz .ln { font-size: 12.5px; color: var(--ti-blue); font-weight: 600; word-break: break-all; padding: 0 8px; }
+    .dz .ls { font-size: 11px; color: var(--ti-blue); opacity: 0.8; }
+    .dz-clr {
+      position: absolute; top: 36px; right: 10px; font-size: 11px;
+      color: #9ca3af; cursor: pointer; padding: 2px 6px; border-radius: 4px; display: none;
+    }
+    .dz-clr:hover { background: var(--ti-navy-lt); color: var(--ti-navy); }
+    input[type="file"] { display: none; }
+
+    /* ── Run row ────────────────────────────────────────── */
+    .run-row { display: flex; justify-content: center; margin-top: 22px; gap: 14px; align-items: center; }
+    #fileHint { font-size: 12px; color: #8a96a8; }
+
+    /* ── Status bar ─────────────────────────────────────── */
+    .sbar {
+      margin-top: 20px; padding: 13px 18px; border-radius: 8px; background: white;
+      border-left: 4px solid var(--ti-blue); font-size: 13px; display: none;
+      align-items: center; gap: 10px;
+      box-shadow: 0 1px 3px rgba(16,27,58,.06);
+    }
+    .sbar.err { border-left-color: #dc2626; }
+    .spinner {
+      width: 15px; height: 15px;
+      border: 2px solid var(--ti-navy-lt);
+      border-top-color: var(--ti-blue);
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite; flex-shrink: 0;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Results header ─────────────────────────────────── */
+    .results { display: none; margin-top: 28px; }
+    .rh {
+      display: flex; justify-content: space-between; align-items: flex-start;
+      margin-bottom: 18px; gap: 16px; flex-wrap: wrap;
+      padding-bottom: 16px;
+      border-bottom: 2px solid var(--ti-yellow);
+    }
+    .rt { font-size: 16px; font-weight: 700; color: var(--ti-navy); }
+    .rs { font-size: 12px; color: #6b7a99; margin-top: 3px; }
+
+    /* ── Summary cards ──────────────────────────────────── */
+    .cards { display: grid; grid-template-columns: repeat(3,1fr); gap: 12px; margin-bottom: 20px; }
+    @media (max-width: 640px) { .cards { grid-template-columns: repeat(2,1fr); } }
+    .card {
+      background: white; border-radius: 8px; padding: 16px 18px;
+      border-top: 4px solid; box-shadow: 0 1px 3px rgba(16,27,58,.07);
+    }
+    /* Total / overview — TI Navy */
+    .ct { border-top-color: var(--ti-navy); }
+    /* Clean — TI Blue */
+    .cc { border-top-color: var(--ti-blue); }
+    /* Exception cards — semantic colors (functional clarity takes priority) */
+    .c1 { border-top-color: #C0392B; }          /* Accrue/Invoice Conflict — CRITICAL */
+    .c2 { border-top-color: #C0392B; }          /* Failed File Match — CRITICAL */
+    .c3 { border-top-color: #7F8C8D; }          /* Status issues — informational only */
+    .c4 { border-top-color: #7F8C8D; }          /* Date mismatch — low priority */
+    .c5 { border-top-color: #C0392B; }          /* Duplicate — CRITICAL */
+    .c6 { border-top-color: #C0392B; }          /* Under-Accrual — CRITICAL */
+    .cn { font-size: 30px; font-weight: 700; line-height: 1; margin-bottom: 4px; color: var(--ti-navy); }
+    .cl { font-size: 11px; color: #6b7a99; line-height: 1.4; }
+    .ca { font-size: 11px; color: var(--ti-navy); font-weight: 600; margin-top: 2px; }
+
+    /* ── Exception detail blocks ────────────────────────── */
+    .ebs { display: flex; flex-direction: column; gap: 10px; margin-bottom: 20px; }
+    .eb {
+      background: white; border-radius: 8px; padding: 16px 20px;
+      box-shadow: 0 1px 3px rgba(16,27,58,.07);
+      border-left: 3px solid transparent;
+    }
+    .ebh { display: flex; justify-content: space-between; align-items: center; margin-bottom: 7px; }
+    .eb h3 { font-size: 12.5px; font-weight: 700; letter-spacing: 0.2px; }
+    .ebdg { font-size: 11px; font-weight: 600; padding: 2px 10px; border-radius: 20px; }
+    .eb p { font-size: 12.5px; color: #4b5869; line-height: 1.6; }
+    .eb ul { margin: 5px 0 0 16px; font-size: 12.5px; color: #4b5869; line-height: 1.8; }
+
+    /* ── Download box ───────────────────────────────────── */
+    .dlbox {
+      background: var(--ti-navy); border-radius: 8px; padding: 28px;
+      text-align: center; margin-bottom: 16px;
+    }
+    .dlbox p { font-size: 12px; color: rgba(255,255,255,0.6); margin-top: 10px; line-height: 1.6; }
+    .opill {
+      display: inline-block;
+      background: rgba(255,255,255,0.1);
+      border: 1px solid rgba(255,255,255,0.2);
+      border-radius: 6px;
+      padding: 8px 14px; font-size: 11.5px; color: rgba(255,255,255,0.75); margin-top: 10px;
+    }
+    .opill code { color: var(--ti-yellow); font-weight: 600; }
+
+    /* ── Buttons ────────────────────────────────────────── */
+    .btn {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 10px 24px; border-radius: 6px; font-size: 13px; font-weight: 600;
+      cursor: pointer; border: none;
+      transition: background 0.15s, transform 0.1s;
+      font-family: 'IBM Plex Sans', sans-serif;
+      letter-spacing: 0.1px;
+    }
+    .btn:active { transform: scale(0.98); }
+    .btn:disabled { opacity: 0.38; cursor: not-allowed; }
+    /* Primary — TI Blue */
+    .btnp { background: var(--ti-blue); color: white; }
+    .btnp:hover:not(:disabled) { background: #255079; }
+    /* Secondary / download — TI Yellow with navy text */
+    .btns { background: var(--ti-yellow); color: var(--ti-navy); }
+    .btns:hover { background: #f0e000; }
+    /* Download button inside dark dlbox — same yellow */
+    .dlbox .btns { font-size: 14px; padding: 13px 32px; }
+
+    .reset { display: inline-block; margin-top: 6px; font-size: 12px; color: #8a96a8; cursor: pointer; text-decoration: underline; }
+    .reset:hover { color: var(--ti-navy); }
+
+    /* ── Interactive exception table ────────────────────────── */
+    .card.clickable { cursor: pointer; transition: transform 0.12s, box-shadow 0.12s; }
+    .card.clickable:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(16,27,58,.13); }
+    .card.clickable.active { outline: 3px solid var(--ti-yellow); outline-offset: 2px; }
+    .eb.clickable { cursor: pointer; transition: box-shadow 0.12s; }
+    .eb.clickable:hover { box-shadow: 0 3px 10px rgba(16,27,58,.1); }
+    .eb.clickable.active { outline: 3px solid var(--ti-yellow); outline-offset: 2px; }
+
+    .exc-table-section {
+      display: none; margin-bottom: 20px;
+      background: white; border-radius: 8px;
+      box-shadow: 0 1px 3px rgba(16,27,58,.07);
+      overflow: hidden;
+    }
+    .exc-table-header {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 14px 20px; border-bottom: 2px solid var(--ti-yellow);
+      background: var(--ti-navy);
+    }
+    .exc-table-header h3 { font-size: 14px; font-weight: 600; color: white; }
+    .exc-table-header .exc-meta { font-size: 11px; color: rgba(255,255,255,0.55); margin-top: 2px; }
+    .exc-table-actions { display: flex; gap: 8px; align-items: center; }
+    .exc-table-wrap { overflow-x: auto; max-height: 640px; overflow-y: auto; }
+    table.exc-table {
+      width: 100%; border-collapse: collapse; font-size: 11.5px;
+      font-family: 'IBM Plex Sans', sans-serif;
+    }
+    .exc-table thead { position: sticky; top: 0; z-index: 1; }
+    .exc-table th {
+      background: var(--ti-cloud); color: var(--ti-navy);
+      font-weight: 600; font-size: 11px; letter-spacing: 0.4px;
+      text-transform: uppercase; padding: 9px 12px;
+      border-bottom: 2px solid #d0d8e8; text-align: left; white-space: nowrap;
+    }
+    .exc-table td {
+      padding: 8px 12px; border-bottom: 1px solid #eef0f5;
+      color: var(--ti-black); vertical-align: top;
+    }
+    .exc-table tr:hover td { background: var(--ti-cloud); }
+    .exc-table td.detail-cell { font-size: 11px; color: #4b5869; min-width: 480px; max-width: 680px; }
+    .exc-table td.type-cell { font-weight: 600; white-space: nowrap; }
+    .exc-table td.amt-cell { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+    .exc-empty { padding: 32px; text-align: center; color: #8a96a8; font-size: 13px; }
+    .btn-sm {
+      display: inline-flex; align-items: center; gap: 5px;
+      padding: 7px 14px; border-radius: 5px; font-size: 11.5px; font-weight: 600;
+      cursor: pointer; border: none; font-family: 'IBM Plex Sans', sans-serif;
+    }
+    .btn-sm-outline {
+      background: transparent; color: rgba(255,255,255,0.8);
+      border: 1px solid rgba(255,255,255,0.3);
+    }
+    .btn-sm-outline:hover { background: rgba(255,255,255,0.1); color: white; }
+    .btn-sm-yellow { background: var(--ti-yellow); color: var(--ti-navy); }
+    .btn-sm-yellow:hover { background: #f0e000; }
+
+    /* ── Mode tabs ──────────────────────────────────────────── */
+    .mode-tabs {
+      display: flex; gap: 0; margin-bottom: 20px;
+      border-bottom: 2px solid #d8dfe8;
+    }
+    .mode-tab {
+      padding: 10px 22px; font-size: 13px; font-weight: 600;
+      font-family: 'IBM Plex Sans', sans-serif;
+      background: none; border: none; cursor: pointer;
+      color: #8a96a8; border-bottom: 2px solid transparent;
+      margin-bottom: -2px; transition: color 0.15s;
+    }
+    .mode-tab.active { color: var(--ti-blue); border-bottom-color: var(--ti-blue); }
+    .mode-tab:hover:not(.active) { color: var(--ti-navy); }
+
+    /* ── Batch drop zone ────────────────────────────────────── */
+    .batch-dz {
+      border: 2px dashed #c8d0dc; border-radius: 10px;
+      padding: 40px 24px; text-align: center; cursor: pointer;
+      background: white; transition: border-color 0.2s, background 0.2s;
+      margin-bottom: 8px;
+    }
+    .batch-dz:hover, .batch-dz.drag { border-color: var(--ti-blue); background: var(--ti-blue-lt); }
+    .batch-dz.has-files { border-color: var(--ti-blue); border-style: solid; background: var(--ti-blue-lt); }
+    .batch-dz h3 { font-size: 15px; font-weight: 600; color: var(--ti-navy); margin: 8px 0 4px; }
+    .batch-dz p  { font-size: 12px; color: #8a96a8; }
+    .batch-dz .bl { color: var(--ti-blue); cursor: pointer; text-decoration: underline; }
+    .batch-file-count {
+      font-size: 24px; font-weight: 700; color: var(--ti-blue); margin-bottom: 4px;
+    }
+    .batch-note {
+      font-size: 11.5px; color: #8a96a8; margin-top: 8px; line-height: 1.5;
+    }
+
+    /* ── Batch progress ─────────────────────────────────────── */
+    .batch-progress {
+      margin: 12px 0; display: none;
+    }
+    .batch-progress-bar-wrap {
+      background: #e2e8f0; border-radius: 4px; height: 6px; overflow: hidden; margin-bottom: 6px;
+    }
+    .batch-progress-bar {
+      height: 100%; background: var(--ti-blue); border-radius: 4px;
+      transition: width 0.2s; width: 0%;
+    }
+    .batch-progress-label { font-size: 12px; color: #6b7280; }
+
+    /* ── Batch results table ────────────────────────────────── */
+    .batch-results { display: none; margin-top: 20px; }
+    .batch-results-header {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 12px; flex-wrap: wrap; gap: 10px;
+    }
+    .batch-results-header h3 { font-size: 15px; font-weight: 600; color: var(--ti-navy); }
+    .batch-results-header .meta { font-size: 12px; color: #8a96a8; margin-top: 2px; }
+    .batch-tbl-wrap { overflow-x: auto; border-radius: 8px; border: 1px solid #e2e8f0; }
+    .batch-tbl {
+      width: 100%; border-collapse: collapse; font-size: 12px;
+      background: white;
+    }
+    .batch-tbl thead th {
+      background: var(--ti-navy); color: white; padding: 9px 12px;
+      text-align: right; font-weight: 600; font-size: 11px;
+      letter-spacing: 0.3px; white-space: nowrap;
+    }
+    .batch-tbl thead th:first-child { text-align: left; min-width: 220px; max-width: 320px; }
+    .batch-tbl thead th.th-dl { text-align: center; }
+    .batch-tbl tbody tr { border-bottom: 1px solid #f0f3f7; }
+    .batch-tbl tbody tr:last-child { border-bottom: none; }
+    .batch-tbl tbody tr:hover { background: #f8fafc; }
+    .batch-tbl td { padding: 8px 12px; text-align: right; vertical-align: middle; }
+    .batch-tbl td:first-child { text-align: left; font-weight: 500; }
+    .batch-tbl td.fname {
+      max-width: 300px; overflow: hidden; text-overflow: ellipsis;
+      white-space: nowrap; font-size: 11.5px;
+    }
+    .batch-tbl td.cell-crit { color: #c0392b; font-weight: 700; }
+    .batch-tbl td.cell-zero { color: #c8d0dc; }
+    .batch-tbl td.cell-info { color: #6b7280; }
+    .batch-tbl td.cell-dl { text-align: center; }
+    .batch-tbl tr.row-error td { color: #9ca3af; font-style: italic; }
+    .batch-tbl tr.row-error td:first-child { color: #ef4444; font-style: normal; }
+    .btn-dl-row {
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 4px 10px; border-radius: 4px; font-size: 11px; font-weight: 600;
+      background: var(--ti-yellow); color: var(--ti-navy);
+      text-decoration: none; white-space: nowrap;
+      cursor: pointer; border: none; font-family: inherit;
+    }
+    .btn-dl-row:hover { background: #f0e000; }
+    .btn-dl-row.no-exc { background: #e8f5e9; color: #388e3c; }
+    .btn-dl-all {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 9px 18px; border-radius: 6px; font-size: 13px; font-weight: 600;
+      background: var(--ti-navy); color: white; cursor: pointer; border: none;
+      font-family: inherit;
+    }
+    .btn-dl-all:hover { background: #1a2d5a; }
+    .batch-summary-pills {
+      display: flex; gap: 10px; flex-wrap: wrap; margin-top: 6px;
+    }
+    .bpill {
+      font-size: 11px; font-weight: 600; padding: 3px 10px; border-radius: 20px;
+    }
+    .bpill-red  { background: #fdecea; color: #c0392b; }
+    .bpill-gray { background: #f0f3f7; color: #6b7280; }
+    .bpill-clean{ background: #e8f5e9; color: #388e3c; }
+
+    /* ── Help / SOP button ──────────────────────────────── */
+    .sop-btn {
+      background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.25);
+      color: rgba(255,255,255,0.75); font-size: 12px; font-weight: 600;
+      padding: 6px 14px; border-radius: 5px; cursor: pointer;
+      font-family: 'IBM Plex Sans', sans-serif; letter-spacing: 0.2px;
+      transition: background 0.15s;
+    }
+    .sop-btn:hover { background: rgba(255,255,255,0.2); color: white; }
+
+    /* ── SOP / Help Modal ───────────────────────────────── */
+    .sop-overlay {
+      display: none; position: fixed; inset: 0;
+      background: rgba(16,27,58,0.6); z-index: 1000;
+      overflow-y: auto; padding: 32px 16px;
+    }
+    .sop-overlay.open { display: flex; align-items: flex-start; justify-content: center; }
+    .sop-modal {
+      background: white; border-radius: 10px; max-width: 840px; width: 100%;
+      box-shadow: 0 8px 40px rgba(16,27,58,0.3); overflow: hidden;
+    }
+    .sop-header {
+      background: var(--ti-navy); padding: 22px 28px;
+      display: flex; align-items: center; justify-content: space-between;
+      border-bottom: 4px solid var(--ti-yellow);
+    }
+    .sop-header h2 { font-size: 17px; font-weight: 700; color: white; }
+    .sop-header p  { font-size: 11.5px; color: rgba(255,255,255,0.5); margin-top: 3px; }
+    .sop-close {
+      background: none; border: none; color: rgba(255,255,255,0.55);
+      font-size: 22px; cursor: pointer; padding: 4px 8px; border-radius: 4px;
+      line-height: 1; flex-shrink: 0; font-family: inherit;
+    }
+    .sop-close:hover { color: white; background: rgba(255,255,255,0.12); }
+    .sop-body { padding: 28px; }
+    .sop-section { margin-bottom: 28px; }
+    .sop-section:last-child { margin-bottom: 0; }
+    .sop-section h3 {
+      font-size: 12px; font-weight: 700; letter-spacing: 0.8px;
+      text-transform: uppercase; color: var(--ti-blue);
+      margin-bottom: 12px; padding-bottom: 8px;
+      border-bottom: 2px solid var(--ti-yellow);
+    }
+    .sop-section p { font-size: 13px; color: #3d4a5c; line-height: 1.7; margin-bottom: 10px; }
+    .sop-section p:last-child { margin-bottom: 0; }
+    .sop-steps { list-style: none; margin: 0; padding: 0; }
+    .sop-steps li { display: flex; gap: 14px; margin-bottom: 14px; align-items: flex-start; }
+    .sop-steps li:last-child { margin-bottom: 0; }
+    .sop-step-num {
+      display: flex; align-items: center; justify-content: center;
+      width: 26px; height: 26px; border-radius: 50%; flex-shrink: 0;
+      background: var(--ti-blue); color: white;
+      font-size: 12px; font-weight: 700; margin-top: 1px;
+    }
+    .sop-step-body { flex: 1; }
+    .sop-step-body strong { display: block; font-size: 13px; color: var(--ti-navy); margin-bottom: 3px; }
+    .sop-step-body span  { font-size: 12.5px; color: #4b5869; line-height: 1.65; }
+    .sop-tip {
+      background: var(--ti-cloud); border-left: 3px solid var(--ti-blue);
+      border-radius: 0 6px 6px 0; padding: 10px 14px;
+      font-size: 12.5px; color: #3d4a5c; line-height: 1.6; margin-top: 12px;
+    }
+    .sop-exc-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 4px; }
+    .sop-exc-table th {
+      background: var(--ti-navy); color: white; padding: 9px 10px;
+      text-align: left; font-weight: 600; font-size: 11px; letter-spacing: 0.3px;
+    }
+    .sop-exc-table td {
+      padding: 8px 10px; border-bottom: 1px solid #eef0f5;
+      vertical-align: top; line-height: 1.55; color: #3d4a5c;
+    }
+    .sop-exc-table tr:last-child td { border-bottom: none; }
+    .sop-exc-table tr:hover td { background: var(--ti-cloud); }
+    .sop-exc-table td:first-child { font-family: monospace; font-size: 11px; color: var(--ti-navy); white-space: nowrap; }
+    .sop-badge {
+      display: inline-block; font-size: 10.5px; font-weight: 600;
+      padding: 2px 8px; border-radius: 12px; white-space: nowrap;
+    }
+    .badge-crit  { background: #fdecea; color: #c0392b; }
+    .badge-info  { background: #f0f3f7; color: #6b7280; }
+  </style>
+</head>
+<body>
+<header>
+  <div class="header-logo">
+    <div class="ti-mark"><span>TI</span></div>
+  </div>
+  <div class="header-text">
+    <h1>Accrual Exception Analyzer</h1>
+    <p>Match failures · status mismatches · date anomalies · duplicates · under-accruals · formatting preserved</p>
+  </div>
+  <div class="header-brand" style="gap:16px">
+    <button class="sop-btn" onclick="openSOP()">? Help / SOP</button>
+    <span>Transportation Insight</span>
+  </div>
+</header>
+
+<div class="container">
+
+  <!-- ── Mode toggle ── -->
+  <div class="mode-tabs">
+    <button class="mode-tab active" id="tabSingle" onclick="setMode('single')">Single File</button>
+    <button class="mode-tab"        id="tabBatch"  onclick="setMode('batch')">Batch Mode</button>
+  </div>
+
+  <!-- ── Batch mode section ── -->
+  <div id="batchSection" style="display:none">
+    <div class="batch-dz" id="batchDZ" onclick="document.getElementById('fi-batch').click()">
+      <div id="batchDZContent">
+        <div style="font-size:32px;margin-bottom:4px">📂</div>
+        <h3>Drop folder or files here</h3>
+        <p>or <span class="bl">browse for .xlsx files</span></p>
+        <p class="batch-note">Select a folder or multiple .xlsx files — each will be analyzed separately.<br>
+          Prior-month under-accrual detection is not available in batch mode.</p>
+      </div>
+    </div>
+    <input type="file" id="fi-batch" accept=".xlsx" multiple style="display:none">
+
+    <div class="run-row">
+      <button class="btn btnp" id="batchRunBtn" disabled onclick="runBatch()">▶ Run Batch Analysis</button>
+      <span id="batchHint">Select .xlsx files to begin</span>
+    </div>
+
+    <div class="batch-progress" id="batchProgress">
+      <div class="batch-progress-bar-wrap"><div class="batch-progress-bar" id="batchBar"></div></div>
+      <div class="batch-progress-label" id="batchProgressLabel"></div>
+    </div>
+
+    <div class="batch-results" id="batchResults">
+      <div class="batch-results-header">
+        <div>
+          <h3 id="batchResultsTitle"></h3>
+          <div class="batch-summary-pills" id="batchSummaryPills"></div>
+        </div>
+        <button class="btn-dl-all" id="batchDlAllBtn" onclick="downloadBatchZip()">⬇ Download All Reports (.zip)</button>
+      </div>
+      <div class="batch-tbl-wrap">
+        <table class="batch-tbl">
+          <thead>
+            <tr>
+              <th style="text-align:left">File</th>
+              <th title="Total data rows after invalid-status Accrue rows removed">Rows</th>
+              <th title="Accrue rows removed (invalid TMS status)">Removed</th>
+              <th title="Total rows with at least one exception">Exceptions</th>
+              <th title="ACCRUE_INVOICED_CONFLICT">Conflict</th>
+              <th title="FAILED_MATCH">Fail Match</th>
+              <th title="TRUE_DUPLICATE + POSSIBLE_DUPLICATE + MULTI_INVOICE">Duplicates</th>
+              <th title="UNDER_ACCRUAL">Under-Accrual</th>
+              <th title="STATUS_INVOICE_MISMATCH + INVOICED_MISSING_TMS + STATUS_DATE_MISMATCH">Info</th>
+              <th class="th-dl">Report</th>
+            </tr>
+          </thead>
+          <tbody id="batchTbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Single file section (existing) ── -->
+  <div id="singleSection">
+  <div class="upload-row">
+    <div class="file-slot">
+      <div class="slot-label">Current Month Accrual</div>
+      <div class="dz" id="dz-cur">
+        <span class="icon">🗂️</span><h3>Drop file here</h3>
+        <p>or <span class="bl">browse</span></p>
+        <p style="margin-top:4px;font-size:11px;color:#d1d5db">.xlsx only</p>
+      </div>
+      <div class="dz-clr" id="clr-cur">✕ remove</div>
+    </div>
+    <div class="file-slot">
+      <div class="slot-label">Prior Month Accrual <span class="badge-opt">optional</span></div>
+      <div class="dz" id="dz-pri">
+        <span class="icon">📁</span><h3>Drop file here</h3>
+        <p>or <span class="bl">browse</span></p>
+        <p style="margin-top:4px;font-size:11px;color:#d1d5db">Enables prior-month under-accrual detection</p>
+      </div>
+      <div class="dz-clr" id="clr-pri">✕ remove</div>
+    </div>
+  </div>
+  <input type="file" id="fi-cur" accept=".xlsx">
+  <input type="file" id="fi-pri" accept=".xlsx">
+
+  <div class="run-row">
+    <button class="btn btnp" id="runBtn" disabled onclick="runAnalysis()">▶ Run Analysis</button>
+    <span id="fileHint">Load the current month file to begin</span>
+  </div>
+  <div class="sbar" id="sbar"><div class="spinner" id="spin"></div><span id="stxt"></span></div>
+
+  <div class="results" id="results">
+    <div class="rh">
+      <div><div class="rt" id="rtitle"></div><div class="rs" id="rsub"></div></div>
+      <button class="btn btns" onclick="downloadFile()">⬇ Download Flagged Report</button>
+    </div>
+    <div class="cards" id="cards"></div>
+    <div class="ebs"  id="ebs"></div>
+
+    <!-- Interactive exception detail table -->
+    <div class="exc-table-section" id="excTableSection">
+      <div class="exc-table-header">
+        <div>
+          <h3 id="excTableTitle"></h3>
+          <div class="exc-meta" id="excTableMeta">Click any exception tile above to filter</div>
+        </div>
+        <div class="exc-table-actions">
+          <button class="btn-sm btn-sm-outline" onclick="filterExceptions(null)">✕ Clear</button>
+          <button class="btn-sm btn-sm-yellow" onclick="exportExcCSV()">⬇ Export CSV</button>
+        </div>
+      </div>
+      <div class="exc-table-wrap">
+        <table class="exc-table">
+          <thead id="excTableHead"></thead>
+          <tbody id="excTableBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="dlbox">
+      <button class="btn btns" onclick="downloadFile()" style="font-size:14px;padding:12px 28px">⬇ Download Flagged Report (.xlsx)</button>
+      <div class="opill">
+        4 columns appended: &nbsp;
+        <code>EXC: Flag</code> &nbsp;·&nbsp; <code>EXC: Type(s)</code> &nbsp;·&nbsp;
+        <code>EXC: Detail</code> &nbsp;·&nbsp; <code>EXC: Suggested Action</code>
+      </div>
+      <p>All original formatting, branding, and cell styles are preserved exactly.<br>
+         Delete the 4 EXC columns before sending to the client.</p>
+    </div>
+    <div style="text-align:center"><span class="reset" id="resetBtn">← Analyze another file</span></div>
+  </div>
+  </div> <!-- /#singleSection -->
+</div>
+
+<script>
+'use strict';
+// ══════════════════════════════════════════════════════════════
+// State
+// loaded[slot] = { wb, ws, name, rowCount, HR (0-based), CM, originalBuffer }
+// ══════════════════════════════════════════════════════════════
+const loaded = { cur: null, pri: null };
+let lastAnalysis = null; // { stats, exceptionRows, excStart, HR, name, originalBuffer }
+
+// ══════════════════════════════════════════════════════════════
+// SheetJS helpers  (0-based row/col)
+// ══════════════════════════════════════════════════════════════
+function cv(ws, r, colName, cm) {
+  const c = cm[colName];
+  if (c === undefined) return null;
+  const cell = ws[XLSX.utils.encode_cell({r, c})];
+  return cell === undefined ? null : (cell.v === undefined ? null : cell.v);
+}
+
+function isBlank(v) { return v === null || v === undefined || String(v).trim() === ''; }
+function str(v)     { return (v === null || v === undefined) ? '' : String(v).trim(); }
+
+function findHeaderRow(ws) {
+  const range = XLSX.utils.decode_range(ws['!ref']);
+  const rMax  = Math.min(range.e.r, range.s.r + 59);
+  for (let r = range.s.r; r <= rMax; r++) {
+    for (let c = range.s.c; c <= Math.min(range.e.c, range.s.c + 119); c++) {
+      const cell = ws[XLSX.utils.encode_cell({r, c})];
+      if (cell && String(cell.v).trim().toLowerCase() === 'tms load status') return r;
+    }
+  }
+  return null;
+}
+
+function buildColMap(ws, hr) {
+  const map = {};
+  const range = XLSX.utils.decode_range(ws['!ref']);
+  for (let c = range.s.c; c <= range.e.c; c++) {
+    const cell = ws[XLSX.utils.encode_cell({r: hr, c})];
+    if (cell && cell.v != null) {
+      const k = String(cell.v).trim();
+      if (k) map[k] = c;
+    }
+  }
+  return map;
+}
+
+// ══════════════════════════════════════════════════════════════
+// Drop zone wiring
+// ══════════════════════════════════════════════════════════════
+function wireDZ(slot) {
+  const dz  = document.getElementById('dz-' + slot);
+  const fi  = document.getElementById('fi-' + slot);
+  const clr = document.getElementById('clr-' + slot);
+  dz.addEventListener('dragover',  e => { e.preventDefault(); if (!dz.classList.contains('loaded')) dz.classList.add('drag'); });
+  dz.addEventListener('dragleave', () => dz.classList.remove('drag'));
+  dz.addEventListener('drop', e => {
+    e.preventDefault(); dz.classList.remove('drag');
+    if (!dz.classList.contains('loaded') && e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0], slot);
+  });
+  dz.addEventListener('click', () => { if (!dz.classList.contains('loaded')) fi.click(); });
+  dz.querySelectorAll('.bl').forEach(el => el.addEventListener('click', e => { e.stopPropagation(); fi.click(); }));
+  fi.addEventListener('change', e => { if (e.target.files[0]) loadFile(e.target.files[0], slot); fi.value = ''; });
+  clr.addEventListener('click', () => clearSlot(slot));
+}
+wireDZ('cur'); wireDZ('pri');
+
+document.getElementById('resetBtn').addEventListener('click', () => {
+  clearSlot('cur'); clearSlot('pri');
+  document.getElementById('results').style.display = 'none';
+  hideStat(); lastAnalysis = null;
+});
+
+async function loadFile(file, slot) {
+  if (!file.name.toLowerCase().endsWith('.xlsx')) { alert('Please use an .xlsx file.'); return; }
+  setDZ(slot, 'loading', file.name);
+  try {
+    const arrayBuffer = await new Promise((res, rej) => {
+      const reader = new FileReader();
+      reader.onload = e => res(e.target.result);
+      reader.onerror = () => rej(new Error('FileReader failed'));
+      reader.readAsArrayBuffer(file);
+    });
+    showStat('Parsing ' + file.name + '…');
+    const data = new Uint8Array(arrayBuffer);
+    const wb   = XLSX.read(data, { type: 'array', cellDates: true, cellStyles: true });
+    const ws   = wb.Sheets[wb.SheetNames[0]];
+    if (!ws) throw new Error('No worksheets found.');
+    const HR = findHeaderRow(ws);
+    if (HR === null) throw new Error('Could not find header row — expected a "TMS Load Status" column.');
+    const CM = buildColMap(ws, HR);
+    if (!CM['Accrue']) throw new Error('Could not find "Accrue" column.');
+    const range    = XLSX.utils.decode_range(ws['!ref']);
+    const rowCount = range.e.r - HR;
+    loaded[slot] = { wb, ws, name: file.name, rowCount, HR, CM, originalBuffer: arrayBuffer };
+    setDZ(slot, 'loaded', file.name, rowCount);
+    hideStat();
+    updateBtn();
+  } catch (err) {
+    setDZ(slot, 'idle', '');
+    hideStat();
+    console.error(err);
+    alert('Could not read file: ' + err.message);
+  }
+}
+
+function clearSlot(slot) {
+  loaded[slot] = null;
+  document.getElementById('fi-' + slot).value = '';
+  setDZ(slot, 'idle', '');
+  updateBtn();
+}
+
+function setDZ(slot, state, name, rows) {
+  const dz  = document.getElementById('dz-' + slot);
+  const clr = document.getElementById('clr-' + slot);
+  const isPri = slot === 'pri';
+  if (state === 'idle') {
+    dz.className = 'dz'; clr.style.display = 'none';
+    dz.innerHTML = isPri
+      ? `<span class="icon">📁</span><h3>Drop file here</h3><p>or <span class="bl">browse</span></p><p style="margin-top:4px;font-size:11px;color:#d1d5db">Enables prior-month under-accrual detection</p>`
+      : `<span class="icon">🗂️</span><h3>Drop file here</h3><p>or <span class="bl">browse</span></p><p style="margin-top:4px;font-size:11px;color:#d1d5db">.xlsx only</p>`;
+    dz.querySelectorAll('.bl').forEach(el => el.addEventListener('click', e => { e.stopPropagation(); document.getElementById('fi-' + slot).click(); }));
+  } else if (state === 'loading') {
+    dz.className = 'dz'; clr.style.display = 'none';
+    dz.innerHTML = `<span class="icon">⏳</span><h3>Loading…</h3><p style="font-size:11px;color:#9ca3af">${name}</p>`;
+  } else if (state === 'loaded') {
+    dz.className = 'dz loaded'; clr.style.display = 'block';
+    dz.innerHTML = `<span class="icon">✅</span><div class="ln">${name}</div><div class="ls">${(rows||0).toLocaleString()} rows loaded</div>`;
+  }
+}
+
+function updateBtn() {
+  const btn  = document.getElementById('runBtn');
+  const hint = document.getElementById('fileHint');
+  btn.disabled = !loaded.cur;
+  hint.textContent = loaded.cur
+    ? (loaded.pri ? '✓ Both files loaded — under-accrual check enabled' : 'Prior month optional — enables under-accrual detection')
+    : 'Load the current month file to begin';
+}
+
+function showStat(msg, type = 'loading') {
+  const bar = document.getElementById('sbar');
+  document.getElementById('stxt').textContent = msg;
+  document.getElementById('spin').style.display = type === 'loading' ? '' : 'none';
+  bar.className = 'sbar' + (type === 'err' ? ' err' : '');
+  bar.style.display = 'flex';
+}
+function hideStat() { document.getElementById('sbar').style.display = 'none'; }
+
+// ══════════════════════════════════════════════════════════════
+// Analysis entry point
+// ══════════════════════════════════════════════════════════════
+function runAnalysis() {
+  document.getElementById('results').style.display = 'none';
+  showStat('Running exception checks on ' + loaded.cur.rowCount.toLocaleString() + ' rows…');
+  setTimeout(() => {
+    try {
+      const { stats, exceptionRows, exceptionData, excStart, rowsToRemove, summaryTable, newSummaryTotals } = analyze();
+      lastAnalysis = { stats, exceptionRows, exceptionData, excStart, rowsToRemove, summaryTable, newSummaryTotals,
+        HR: loaded.cur.HR, name: loaded.cur.name,
+        originalBuffer: loaded.cur.originalBuffer };
+      hideStat();
+      renderResults(stats);
+    } catch (err) {
+      showStat('Error during analysis: ' + err.message, 'err');
+      console.error(err);
+    }
+  }, 60);
+}
+
+// ══════════════════════════════════════════════════════════════
+// Locate the accrual summary table above the header row.
+// Returns { 'Accrue': { excelRow, amountCol, shipmentsCol }, ... } or null.
+// ══════════════════════════════════════════════════════════════
+function findSummaryTable(ws, HR) {
+  const range = XLSX.utils.decode_range(ws['!ref']);
+  let amountCol = -1, shipmentsCol = -1;
+  const labelRows = {};
+
+  for (let r = range.s.r; r < HR; r++) {
+    for (let c = range.s.c; c <= Math.min(range.e.c, range.s.c + 50); c++) {
+      const cell = ws[XLSX.utils.encode_cell({r, c})];
+      if (!cell || cell.v == null) continue;
+      const v  = String(cell.v).trim();
+      const vl = v.toLowerCase();
+      if (vl === 'amount') amountCol = c;
+      if (vl === 'total shipments' || vl === 'shipments') shipmentsCol = c;
+      if (v === 'Accrue' || v === 'Invoiced' || v === 'Invoiced Only') labelRows[v] = r + 1;
+    }
+  }
+
+  if (!Object.keys(labelRows).length || amountCol < 0) return null;
+  const out = {};
+  for (const [name, excelRow] of Object.entries(labelRows))
+    out[name] = { excelRow, amountCol, shipmentsCol };
+  return out;
+}
+
+// ══════════════════════════════════════════════════════════════
+// Core analysis  (synchronous)
+// Returns: { stats, exceptionRows, excStart, rowsToRemove, summaryTable, newSummaryTotals }
+// ══════════════════════════════════════════════════════════════
+function analyze() {
+  const { ws, HR, CM } = loaded.cur;
+  const range      = XLSX.utils.decode_range(ws['!ref']);
+  const totalRows  = range.e.r; // last 0-based row index
+  const get        = (r, col) => cv(ws, r, col, CM);
+  const excStart   = range.e.c + 1;  // 0-based col after last existing col
+
+  const summaryTable    = findSummaryTable(ws, HR);
+  const newSummaryTotals = {
+    'Accrue':       { amount: 0, shipments: 0 },
+    'Invoiced':     { amount: 0, shipments: 0 },
+    'Invoiced Only':{ amount: 0, shipments: 0 }
+  };
+
+  // ── Derive report month from max TI Invoice Date on Invoiced rows ──
+  let reportYear = null, reportMonth = null;
+  for (let r = HR+1; r <= totalRows; r++) {
+    if (str(get(r,'Accrue')) !== 'Invoiced') continue;
+    const d = get(r,'TI Invoice Date');
+    if (!(d instanceof Date)) continue;
+    if (reportYear===null || d.getFullYear()>reportYear ||
+        (d.getFullYear()===reportYear && d.getMonth()>reportMonth)) {
+      reportYear  = d.getFullYear();
+      reportMonth = d.getMonth();
+    }
+  }
+  const reportMonthLabel = reportYear!==null
+    ? new Date(reportYear,reportMonth,1).toLocaleString('en-US',{month:'long',year:'numeric'})
+    : 'unknown month';
+
+  // reportDate: the date the accrual was pulled — used as the reference for all
+  // date-based checks (pickup/delivery comparisons).  Reports are pulled on the
+  // 1st of the month, so use the first day of the derived report month.
+  // Falls back to today only if we couldn't determine the report month.
+  const reportDate = reportYear !== null
+    ? new Date(reportYear, reportMonth, 1)
+    : (() => { const d = new Date(); d.setHours(0,0,0,0); return d; })();
+
+  // Valid TMS statuses for Accruing rows — rows outside this set are removed from output
+  const ACCRUING_KEEP = new Set(['BOOKED','IN TRANSIT','DELIVERED']);
+
+  // ══ PASS 1 ── lookup structures ══
+  // invOnlyRefs: maps TI BOL *and* TI PO from Invoiced Only rows → {invoice, row, matchedField}
+  // Used by FAILED_MATCH (EXC2) to catch cases where billing software placed the
+  // reference number in the wrong field.  TI PO is intentionally excluded from
+  // dupMaps because a PO number legitimately spans multiple shipments.
+  const invOnlyRefs  = {};
+  const dupMaps = { tms_pro:{}, tms_ref:{}, ti_bol:{} };
+
+  for (let r = HR+1; r <= totalRows; r++) {
+    const accrue = str(get(r,'Accrue'));
+    const tiInv  = get(r,'TI Invoice Number');
+    const tiBOL  = str(get(r,'TI BOL Number'));
+    const tiPO   = str(get(r,'TI PO Number'));
+    const tmsPro = str(get(r,'TMS Pro Number'));
+    const tmsRef = str(get(r,'TMS Primary Reference Value'));
+    const amt    = get(r,'Amount');
+    const ships  = get(r,'Shipments');
+    const balDue = str(get(r,'Bal Due or Adjustment'));
+
+    if (accrue==='Invoiced Only') {
+      if (!isBlank(tiBOL)) invOnlyRefs[tiBOL] = { invoice: tiInv, row: r, matchedField: 'TI BOL' };
+      if (!isBlank(tiPO))  invOnlyRefs[tiPO]  = { invoice: tiInv, row: r, matchedField: 'TI PO' };
+    }
+
+    const tmsStatusP1 = str(get(r,'TMS Load Status')).toUpperCase();
+    const entry={row:r, invoice:tiInv!=null?str(tiInv):null, amount:amt, shipments:ships, balDue, accrue, tmsStatus:tmsStatusP1};
+    const addM=(map,key)=>{ if(!key)return; if(!map[key])map[key]=[]; map[key].push(entry); };
+    addM(dupMaps.tms_pro, tmsPro);
+    addM(dupMaps.tms_ref, tmsRef);
+    addM(dupMaps.ti_bol,  tiBOL);
+    // TI PO intentionally excluded: a PO spans multiple legitimate shipments
+  }
+
+  const SEV    = {TRUE_DUPLICATE:3, POSSIBLE_DUPLICATE:2, MULTI_INVOICE:1};
+  const dupInfo = {};
+  function processDupMap(map, fieldName) {
+    for (const [val,entries] of Object.entries(map)) {
+      if (entries.length<2) continue;
+      // If any row in the group has a $0 amount it is an adjustment —
+      // the whole group is not a billable duplicate concern.
+      if (entries.some(e=>e.amount!=null&&Number(e.amount)===0)) continue;
+      // If the group spans Accrue AND Invoiced/Invoiced Only, it is an
+      // ACCRUE_INVOICED_CONFLICT (file match failure) — handled separately;
+      // do NOT also flag it as MULTI_INVOICE to avoid double-counting.
+      if (entries.some(e=>e.accrue==='Accrue') &&
+          entries.some(e=>e.accrue==='Invoiced'||e.accrue==='Invoiced Only')) continue;
+      for (const entry of entries) {
+        // Bal Due / Adjustment rows are legitimate secondary charges —
+        // exclude from duplicate flagging entirely; UNDER_ACCRUAL still applies.
+        if (entry.balDue==='Bal Due or Adjustment') continue;
+        const peers   = entries.filter(e=>e.row!==entry.row);
+        const sameInv = peers.some(p=>p.invoice&&p.invoice===entry.invoice);
+        const sameAmt = peers.some(p=>p.amount!=null&&entry.amount!=null&&
+          Math.abs(Number(p.amount)-Number(entry.amount))<0.01&&p.invoice!==entry.invoice);
+        let subtype,detail,action;
+        if (entry.shipments===0) {
+          subtype='MULTI_INVOICE';
+          detail=`${fieldName} "${val}" — Shipments=0 row (${entries.length} rows share this reference)`;
+          action='Verify as secondary charge (accessorial) — not a true billing duplicate';
+        } else if (sameInv) {
+          subtype='TRUE_DUPLICATE';
+          detail=`${fieldName} "${val}" billed on the same invoice more than once (Invoice #${entry.invoice}, ${entries.length} rows)`;
+          action='Review and void the duplicate invoice entry';
+        } else if (sameAmt) {
+          subtype='POSSIBLE_DUPLICATE';
+          detail=`${fieldName} "${val}" appears ${entries.length}× with the same amount ($${fmtAmt(entry.amount)}) on different invoices`;
+          action='Verify whether this is a duplicate charge or a separate legitimate invoice';
+        } else {
+          subtype='MULTI_INVOICE';
+          detail=`${fieldName} "${val}" has ${entries.length} invoices with differing amounts — may be accessorial or balance due`;
+          action='Confirm all charges are legitimate (accessorial, balance due, etc.)';
+        }
+        const ex=dupInfo[entry.row];
+        if (!ex||SEV[subtype]>SEV[ex.subtype]) dupInfo[entry.row]={subtype,detail,action};
+      }
+    }
+  }
+  processDupMap(dupMaps.tms_pro,'TMS PRO');
+  processDupMap(dupMaps.tms_ref,'TMS Primary Reference');
+  processDupMap(dupMaps.ti_bol,'TI BOL');
+
+  // ══ PASS 2 ── prior month set ══
+  let priorRefs = null;
+  if (loaded.pri) {
+    priorRefs = new Set();
+    const { ws:pw, HR:pHR, CM:pCM } = loaded.pri;
+    const pr = XLSX.utils.decode_range(pw['!ref']);
+    for (let r = pHR+1; r <= pr.e.r; r++) {
+      if (str(cv(pw,r,'Accrue',pCM))!=='Accrue') continue;
+      [str(cv(pw,r,'TMS Primary Reference Value',pCM)),
+       str(cv(pw,r,'TMS Pro Number',pCM))
+      ].forEach(v=>{ if(v) priorRefs.add(v); });
+    }
+  }
+
+  // ══ PASS 3 ── ACCRUE_INVOICED_CONFLICT detection ══
+  // Find TMS Pro numbers that appear across BOTH Accrue and Invoiced/Invoiced Only rows.
+  // This is a file match failure — the same physical shipment is simultaneously sitting
+  // in Accrue (unmatched) and Invoiced (matched), meaning the billing platform's match
+  // did not collapse the rows. Flag both sides so both can be actioned.
+  const proConflictRows = new Set(); // 0-based row indices
+  for (const [pro, entries] of Object.entries(dupMaps.tms_pro)) {
+    if (entries.length < 2) continue;
+    // Only count Accrue rows whose TMS status is valid — invalid-status Accrue rows
+    // are removed from the output in PASS 4 and must not trigger a conflict flag
+    // against the Invoiced row (otherwise the Invoiced row is flagged against a ghost)
+    const hasKeepableAccrue = entries.some(e =>
+      e.accrue === 'Accrue' && ACCRUING_KEEP.has(e.tmsStatus));
+    const hasInvoiced = entries.some(e =>
+      e.accrue === 'Invoiced' || e.accrue === 'Invoiced Only');
+    if (hasKeepableAccrue && hasInvoiced) entries.forEach(e => proConflictRows.add(e.row));
+  }
+
+  // ══ PASS 4 ── evaluate ══
+  const stats={
+    total:0, clean:0, removed:0,
+    exc1_conflict:0, exc2_fm:0,
+    exc3_si:0, exc3_missing_tms:0, exc4_cancel:0, exc4_date:0,
+    dup_true:0, dup_poss:0, dup_multi:0, under:0, under_amt:0
+  };
+  const PRE_TRANSIT = new Set(['BOOKED','PENDING','RATED','TENDER EXPIRED','CANCELLED']);
+  const exceptionRows = {};
+  const exceptionData = []; // rich row objects for the interactive table
+  const rowsToRemove  = new Set(); // Excel 1-based row numbers to strip from output
+
+  for (let r = HR+1; r <= totalRows; r++) {
+    const tmsStatus  = str(get(r,'TMS Load Status')).toUpperCase();
+    const tmsPickup  = get(r,'TMS Pickup Date');
+    const tmsDlv     = get(r,'TMS Delivery Date');
+    const tmsRef     = str(get(r,'TMS Primary Reference Value'));
+    const tiInv      = get(r,'TI Invoice Number');
+    const tiInvDate  = get(r,'TI Invoice Date');
+    const tiPickup   = get(r,'TI Pickup Date');
+    const accrue     = str(get(r,'Accrue'));
+    const amount     = get(r,'Amount');
+    const tiBOL      = str(get(r,'TI BOL Number'));
+    const tiPO       = str(get(r,'TI PO Number'));
+    const tiPro      = str(get(r,'TI Pro Number'));
+    const balDue     = str(get(r,'Bal Due or Adjustment'));
+    const isBalDueRow= balDue==='Bal Due or Adjustment';
+    const ships      = get(r,'Shipments');
+
+    // Remove Accrue rows whose TMS status is not Booked, In Transit, or Delivered
+    if (accrue==='Accrue' && !ACCRUING_KEEP.has(tmsStatus)) {
+      rowsToRemove.add(r+1);
+      stats.removed++;
+      continue;
+    }
+
+    // Accumulate summary table totals for kept rows.
+    // Amount: sum the Amount column.
+    // Shipments: count rows (Accruing rows have no invoice Shipments value yet).
+    if (newSummaryTotals[accrue]) {
+      newSummaryTotals[accrue].amount    += amount!=null ? Number(amount) : 0;
+      newSummaryTotals[accrue].shipments += 1;
+    }
+
+    stats.total++;
+    const exc = [];
+
+    if (proConflictRows.has(r)) {
+      const tmsPro    = str(get(r,'TMS Pro Number'));
+      const peers     = (dupMaps.tms_pro[tmsPro]||[]).filter(e=>e.row!==r);
+      const peerList  = peers.map(e=>`${e.accrue} ($${e.amount!=null?fmtAmt(Number(e.amount)):'—'})`).join(', ');
+      if (accrue==='Accrue') {
+        exc.push({type:'ACCRUE_INVOICED_CONFLICT',
+          detail:`TMS Pro "${tmsPro}" is Accruing on this row but the same shipment also appears as ${peerList} — file match failure: invoice was processed but this Accruing copy was not collapsed`,
+          action:`Remove this Accruing row from the accrual — the shipment has been invoiced. Investigate the file match failure in the billing platform for TMS Pro "${tmsPro}"`});
+      } else {
+        exc.push({type:'ACCRUE_INVOICED_CONFLICT',
+          detail:`TMS Pro "${tmsPro}" is ${accrue} on this row but also appears as Accruing ($${peers.filter(e=>e.accrue==='Accrue').map(e=>fmtAmt(Number(e.amount))).join(', ')}) — the Accruing copy was not removed when this shipment was invoiced`,
+          action:`Confirm the corresponding Accruing row for TMS Pro "${tmsPro}" is removed from the accrual to eliminate double-counting`});
+      }
+      stats.exc1_conflict++;
+    }
+
+    if (accrue==='Accrue' && !isBlank(tmsRef)) {
+      const match = invOnlyRefs[tmsRef];
+      if (match) {
+        exc.push({type:'FAILED_MATCH',
+          detail:`TMS Primary Reference "${tmsRef}" matches ${match.matchedField} on an Invoiced Only row (Invoice #${str(match.invoice)}) — invoice exists but file match did not link the TMS record`,
+          action:`Manually link TMS record to Invoice #${str(match.invoice)}; reclassify from Accruing to Invoiced`});
+        stats.exc2_fm++;
+      }
+    }
+
+    if (accrue==='Invoiced' && tmsStatus && tmsStatus!=='DELIVERED') {
+      exc.push({type:'STATUS_INVOICE_MISMATCH',
+        detail:`Invoice #${str(tiInv)} confirms delivery but TMS status is still ${tmsStatus}`,
+        action:'Update TMS status to DELIVERED'});
+      stats.exc3_si++;
+    }
+
+    if (accrue==='Invoiced' && isBlank(get(r,'TMS Load Status'))) {
+      exc.push({type:'INVOICED_MISSING_TMS',
+        detail:`Row is Invoiced but all TMS fields are blank — no Load Status, no Reference, no Pickup Date (TI BOL: "${tiBOL}", Invoice: #${str(tiInv)})`,
+        action:'Locate the TMS record to identify why it is not appearing in the report — a physical match did occur and this row should remain Invoiced; investigate the TMS record for data or sync issues'});
+      stats.exc3_missing_tms++;
+    }
+
+    if (tmsStatus==='CANCELLED' && accrue==='Accrue') {
+      exc.push({type:'STATUS_DATE_MISMATCH',
+        detail:'Shipment is CANCELLED in TMS but remains in Accrue status — cancelled shipments should not carry an accrual',
+        action:'Remove from accrual or void the cancelled load in TMS'});
+      stats.exc4_cancel++;
+    }
+
+    if (PRE_TRANSIT.has(tmsStatus) && tmsPickup instanceof Date && tmsPickup<reportDate
+        && !(tmsStatus==='CANCELLED' && accrue==='Accrue')) {
+      const daysAgo=Math.floor((reportDate-tmsPickup)/86400000);
+      exc.push({type:'STATUS_DATE_MISMATCH',
+        detail:`TMS Pickup Date was ${fmtDate(tmsPickup)} (${daysAgo}d before report date ${fmtDate(reportDate)}) but status remains ${tmsStatus} — should be at minimum IN TRANSIT`,
+        action:'Verify shipment movement and update TMS status'});
+      stats.exc4_date++;
+    }
+
+    if (tmsStatus && tmsStatus!=='DELIVERED' && tmsDlv instanceof Date && tmsDlv<reportDate) {
+      const daysAgo=Math.floor((reportDate-tmsDlv)/86400000);
+      exc.push({type:'STATUS_DATE_MISMATCH',
+        detail:`Delivery was scheduled ${fmtDate(tmsDlv)} (${daysAgo}d before report date ${fmtDate(reportDate)}) but status remains ${tmsStatus}`,
+        action:'Confirm delivery and update TMS status to DELIVERED'});
+      stats.exc4_date++;
+    }
+
+    if (dupInfo[r]) {
+      const d=dupInfo[r];
+      exc.push({type:d.subtype,detail:d.detail,action:d.action});
+      if (d.subtype==='TRUE_DUPLICATE')          stats.dup_true++;
+      else if (d.subtype==='POSSIBLE_DUPLICATE') stats.dup_poss++;
+      else                                       stats.dup_multi++;
+    }
+
+    const isReportMonthInv = reportYear!==null && tiInvDate instanceof Date &&
+      tiInvDate.getFullYear()===reportYear && tiInvDate.getMonth()===reportMonth;
+    const pickupPriorMonth = tiPickup instanceof Date && (
+      tiPickup.getFullYear()<reportYear ||
+      (tiPickup.getFullYear()===reportYear && tiPickup.getMonth()<reportMonth)
+    );
+    if (priorRefs!==null && (accrue==='Invoiced'||isBalDueRow) && isReportMonthInv && pickupPriorMonth) {
+      const ids=[tiBOL,tiPO,tiPro].filter(v=>v);
+      if (!ids.some(v=>priorRefs.has(v))) {
+        exc.push({type:'UNDER_ACCRUAL',
+          detail:`Invoiced in ${reportMonthLabel} but picked up ${fmtDate(tiPickup)} (prior month) — no matching TMS Primary Reference or TMS Pro Number found as Accruing in the prior month file (checked TI BOL: "${tiBOL}", TI PO: "${tiPO}", TI PRO: "${tiPro}")`,
+          action:'Record as prior-period under-accrual; adjust prior month financials if material'});
+        stats.under++;
+        stats.under_amt += amount!=null?Number(amount):0;
+      }
+    }
+
+    if (exc.length>0) {
+      // Key by Excel row number (1-based = r+1 for SheetJS 0-based r)
+      exceptionRows[r+1] = {
+        flag:   '⚠ EXCEPTION',
+        types:  exc.map(e=>e.type).join(' | '),
+        detail: exc.map(e=>e.detail).join(' | '),
+        action: exc.map(e=>e.action).join(' | ')
+      };
+      // Rich row data for the interactive dashboard table
+      exceptionData.push({
+        excelRow:  r+1,
+        accrue,
+        tmsStatus,
+        tmsPickup:  tmsPickup instanceof Date ? fmtDate(tmsPickup) : '',
+        tmsDlv:     tmsDlv    instanceof Date ? fmtDate(tmsDlv)    : '',
+        tmsRef,
+        tiInv:      tiInv != null ? str(tiInv) : '',
+        amount,
+        tiBOL,
+        tiPO,
+        tiPro,
+        excTypes:   exc.map(e=>e.type),
+        excDetail:  exc.map(e=>e.detail).join(' | '),
+        excAction:  exc.map(e=>e.action).join(' | ')
+      });
+    } else {
+      stats.clean++;
+    }
+  }
+
+  return { stats, exceptionRows, exceptionData, excStart, rowsToRemove, summaryTable, newSummaryTotals };
+}
+
+// ══════════════════════════════════════════════════════════════
+// Render results
+// ══════════════════════════════════════════════════════════════
+function renderResults(stats) {
+  const hasPrior  = !!loaded.pri;
+  const exc1Total = stats.exc1_conflict;
+  const dupTotal  = stats.dup_true + stats.dup_poss + stats.dup_multi;
+  const exc4Total = stats.exc4_cancel + stats.exc4_date;
+  const excRows   = stats.total - stats.clean;
+  const pct       = stats.total>0 ? Math.round(excRows/stats.total*100) : 0;
+
+  document.getElementById('rtitle').textContent = loaded.cur.name + ' — ' + N(excRows) + ' exception row' + (excRows!==1?'s':'') + ' found';
+  document.getElementById('rsub').textContent   = N(stats.total) + ' rows · ' + pct + '% flagged · ' + N(stats.clean) + ' clean'
+    + (stats.removed>0 ? ' · ' + N(stats.removed) + ' invalid-status Accrue rows removed' : '');
+
+  // Cards: summary → CRITICAL (highest impact first) → low / informational
+  const cards=[
+    {cls:'ct',cnt:N(stats.total),            lbl:'Total Rows (after removal)'},
+    {cls:'cc',cnt:N(stats.clean),            lbl:'Clean — No Exceptions'},
+    // CRITICAL
+    {cls:'c1',cnt:N(exc1Total),              lbl:'Accrue / Invoice Conflict',         filter:'ACCRUE_CONFLICT'},
+    {cls:'c2',cnt:N(stats.exc2_fm),          lbl:'Failed File Match',                 filter:'FAILED_MATCH'},
+    {cls:'c5',cnt:N(dupTotal),               lbl:'Duplicate Reference Rows',          filter:'DUPLICATE'},
+    // Low / informational
+    {cls:'c3',cnt:N(stats.exc3_si),          lbl:'Invoiced / Non-DELIVERED Status',   filter:'STATUS_INVOICE_MISMATCH'},
+    {cls:'c3',cnt:N(stats.exc3_missing_tms), lbl:'Invoiced / No TMS Data',            filter:'INVOICED_MISSING_TMS'},
+    {cls:'c4',cnt:N(exc4Total),              lbl:'Status / Date Mismatch',            filter:'STATUS_DATE_MISMATCH'},
+  ];
+  // Under-Accrual is CRITICAL — insert after Duplicates (index 4)
+  if (hasPrior) cards.splice(5, 0, {cls:'c6',cnt:N(stats.under),lbl:'Prior-Month Under-Accruals',
+    amt:stats.under>0?'$'+fmtAmt(stats.under_amt)+' exposure':null, filter:'UNDER_ACCRUAL'});
+
+  document.getElementById('cards').innerHTML = cards.map(c=>
+    `<div class="card ${c.cls}${c.filter?' clickable':''}" ${c.filter?`onclick="filterExceptions('${c.filter}')" data-filter="${c.filter}"`:''}>
+       <div class="cn">${c.cnt}</div>
+       <div class="cl">${c.lbl}</div>
+       ${c.amt?`<div class="ca">${c.amt}</div>`:''}
+       ${c.filter?`<div style="font-size:10px;color:#8a96a8;margin-top:6px;letter-spacing:0.5px">CLICK TO FILTER ↓</div>`:''}
+     </div>`
+  ).join('');
+
+  // Blocks: CRITICAL first, then low / informational
+  const blocks=[];
+  // — CRITICAL —
+  if (exc1Total>0) blocks.push({color:'#C0392B',title:'ACCRUE / INVOICE CONFLICT',cnt:exc1Total,filter:'ACCRUE_CONFLICT',
+    body:`${N(exc1Total)} row${P(exc1Total)} where the same TMS Pro Number appears simultaneously as <strong>Accruing</strong> and <strong>Invoiced</strong>. The shipment was invoiced in the billing platform but the Accruing copy was not removed — a file match failure causing double-counting in the accrual.`,
+    bullets:['Flag affects both sides: the Accruing row (should be removed) and the Invoiced row (the correct record)']});
+  if (stats.exc2_fm>0) blocks.push({color:'#C0392B',title:'FAILED_MATCH',cnt:stats.exc2_fm,filter:'FAILED_MATCH',
+    body:`${N(stats.exc2_fm)} Accruing row${P(stats.exc2_fm)} whose TMS Primary Reference Value matches a TI BOL Number on an Invoiced Only row. The invoice was processed but the file match never linked the TMS record.`});
+  if (dupTotal>0) blocks.push({color:'#C0392B',title:'DUPLICATE / MULTI-INVOICE REFERENCE',cnt:dupTotal,filter:'DUPLICATE',
+    body:`${N(dupTotal)} row${P(dupTotal)} share a reference field (TMS Pro, TMS Primary Ref, TI BOL, or TI PO) with at least one other row:`,
+    bullets:[
+      stats.dup_true>0?`<strong>${N(stats.dup_true)} True Duplicate</strong> — identical invoice number billed more than once`:null,
+      stats.dup_poss>0?`<strong>${N(stats.dup_poss)} Possible Duplicate</strong> — same amount on different invoice numbers`:null,
+      stats.dup_multi>0?`<strong>${N(stats.dup_multi)} Multi-Invoice</strong> — differing amounts or Shipments=0 / Bal Due rows`:null
+    ].filter(Boolean)});
+  if (hasPrior) blocks.push({color:stats.under>0?'#C0392B':'#22c55e',title:'UNDER_ACCRUAL — Prior Month',cnt:stats.under,filter:'UNDER_ACCRUAL',
+    body:stats.under>0
+      ?`${N(stats.under)} row${P(stats.under)} invoiced in <strong>the current report month</strong> with a <strong>TI Pickup Date in a prior month</strong> where no matching TMS record was found as Accruing in the prior month file. These represent <strong>$${fmtAmt(stats.under_amt)}</strong> in unaccrued freight costs.`
+      :'No prior-month under-accruals detected.'});
+  // — Low / informational —
+  if (stats.exc3_si>0) blocks.push({color:'#7F8C8D',title:'STATUS_INVOICE_MISMATCH',cnt:stats.exc3_si,filter:'STATUS_INVOICE_MISMATCH',
+    body:`${N(stats.exc3_si)} row${P(stats.exc3_si)} marked Invoiced but TMS status has not progressed to DELIVERED. Since an invoice = signed BOL = proof of delivery, these TMS records are stale. Note: no direct financial impact — these reflect TMS maintenance gaps only.`});
+  if (stats.exc3_missing_tms>0) blocks.push({color:'#7F8C8D',title:'INVOICED_MISSING_TMS',cnt:stats.exc3_missing_tms,filter:'INVOICED_MISSING_TMS',
+    body:`${N(stats.exc3_missing_tms)} row${P(stats.exc3_missing_tms)} categorized as Invoiced but all TMS fields are blank. These have billing data but no TMS counterpart.`});
+  if (exc4Total>0) {
+    const parts=[];
+    if (stats.exc4_cancel>0) parts.push(`<strong>${N(stats.exc4_cancel)} Cancelled + Accruing</strong> — CANCELLED in TMS but still accruing.`);
+    if (stats.exc4_date>0)   parts.push(`<strong>${N(stats.exc4_date)} date mismatches</strong> — past pickup/delivery dates in non-progressed statuses.`);
+    blocks.push({color:'#7F8C8D',title:'STATUS_DATE_MISMATCH',cnt:exc4Total,filter:'STATUS_DATE_MISMATCH',body:parts.join(' ')});
+  }
+  if (blocks.length===0) blocks.push({color:'#22c55e',title:'✓ No exceptions found',cnt:0,body:`All ${N(stats.total)} rows passed every check.`});
+
+  document.getElementById('ebs').innerHTML = blocks.map(b=>`
+    <div class="eb${b.filter&&b.cnt>0?' clickable':''}" ${b.filter&&b.cnt>0?`onclick="filterExceptions('${b.filter}')" data-filter="${b.filter}"`:''}>
+      <div class="ebh">
+        <h3 style="color:${b.color}">${b.title}</h3>
+        <div style="display:flex;align-items:center;gap:8px">
+          ${b.cnt>0?`<span class="ebdg" style="background:${b.color}22;color:${b.color}">${N(b.cnt)} rows</span>`:`<span class="ebdg" style="background:#dcfce7;color:#16a34a">✓ None</span>`}
+          ${b.filter&&b.cnt>0?`<span style="font-size:10px;color:#8a96a8;letter-spacing:0.5px">CLICK TO FILTER ↓</span>`:''}
+        </div>
+      </div>
+      <p>${b.body}</p>
+      ${b.bullets?'<ul>'+b.bullets.map(li=>`<li>${li}</li>`).join('')+'</ul>':''}
+    </div>`).join('');
+
+  document.getElementById('results').style.display='block';
+  // Reset any active filter from a previous run
+  activeExcFilter = null;
+  document.getElementById('excTableSection').style.display = 'none';
+}
+
+// ══════════════════════════════════════════════════════════════
+// Download: JSZip opens original file, injects cells into
+// worksheet XML, keeps ALL other files byte-for-byte identical
+// ══════════════════════════════════════════════════════════════
+async function downloadFile() {
+  if (!lastAnalysis) return;
+  try {
+    showStat('Building output file (preserving all formatting)…');
+    const { exceptionRows, excStart, HR, name, originalBuffer, rowsToRemove, summaryTable, newSummaryTotals } = lastAnalysis;
+    const headerExcelRow = HR + 1; // 1-based Excel row of the header
+
+    // Open original as ZIP
+    const zip = await JSZip.loadAsync(originalBuffer);
+
+    // Locate worksheet via workbook relationships (handles capital-S filenames)
+    const relsXml = await zip.file('xl/_rels/workbook.xml.rels').async('text');
+    const wsMatch = relsXml.match(/Type="[^"]*\/worksheet"[^>]*Target="([^"]+)"/);
+    const wsRelPath = wsMatch ? wsMatch[1] : 'worksheets/sheet1.xml';
+    const wsPath    = 'xl/' + wsRelPath;
+
+    // Inject EXC column styles (red header fill + wrap-text data)
+    const { hdrSi, dataSi } = await addExcStyles(zip);
+
+    const wsXml = await zip.file(wsPath).async('text');
+    const modXml = injectExceptionCells(wsXml, headerExcelRow, excStart, exceptionRows, rowsToRemove, summaryTable, newSummaryTotals, hdrSi, dataSi);
+    zip.file(wsPath, modXml);
+
+    const blob = await zip.generateAsync({ type:'blob', compression:'DEFLATE', compressionOptions:{level:6} });
+    hideStat();
+    const url = URL.createObjectURL(blob);
+    const a   = document.createElement('a');
+    a.href = url;
+    a.download = name.replace(/\.xlsx$/i,'') + ' — Exceptions Flagged.xlsx';
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    hideStat();
+    console.error(err);
+    alert('Download failed: ' + err.message);
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+// Inject EXC column styles into xl/styles.xml
+// Returns { hdrSi, dataSi } — new cellXf indices, or nulls on failure
+// ══════════════════════════════════════════════════════════════
+async function addExcStyles(zip) {
+  try {
+    let sxml = await zip.file('xl/styles.xml').async('text');
+
+    // 1. White bold font for headers
+    const fontCnt = parseInt((sxml.match(/<fonts\b[^>]*count="(\d+)"/) || [,1])[1]);
+    sxml = sxml
+      .replace(/(<fonts\b[^>]*count=")(\d+)(")/, `$1${fontCnt + 1}$3`)
+      .replace('</fonts>',
+        '<font><b/><sz val="10"/><color rgb="FFFFFFFF"/><name val="Calibri"/><family val="2"/></font></fonts>');
+
+    // 2. Dark-red fill (#C0392B)
+    const fillCnt = parseInt((sxml.match(/<fills\b[^>]*count="(\d+)"/) || [,2])[1]);
+    sxml = sxml
+      .replace(/(<fills\b[^>]*count=")(\d+)(")/, `$1${fillCnt + 1}$3`)
+      .replace('</fills>',
+        '<fill><patternFill patternType="solid"><fgColor rgb="FFC0392B"/><bgColor indexed="64"/></patternFill></fill></fills>');
+
+    // 3. Two new cellXfs — header (red+white bold) and data (wrap text)
+    const xfCnt = parseInt((sxml.match(/<cellXfs\b[^>]*count="(\d+)"/) || [,1])[1]);
+    const hdrSi  = xfCnt;
+    const dataSi = xfCnt + 1;
+    sxml = sxml
+      .replace(/(<cellXfs\b[^>]*count=")(\d+)(")/, `$1${xfCnt + 2}$3`)
+      .replace('</cellXfs>',
+        `<xf numFmtId="0" fontId="${fontCnt}" fillId="${fillCnt}" borderId="0" xfId="0" applyFill="1" applyFont="1" applyAlignment="1"><alignment wrapText="1" vertical="center"/></xf>` +
+        `<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment wrapText="1" vertical="top"/></xf>` +
+        '</cellXfs>');
+
+    zip.file('xl/styles.xml', sxml);
+    return { hdrSi, dataSi };
+  } catch(e) {
+    console.warn('EXC style injection failed:', e);
+    return { hdrSi: null, dataSi: null };
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+// XML injection: add exception cells to worksheet XML
+// excStart is 0-based column index of first new column
+// ══════════════════════════════════════════════════════════════
+function injectExceptionCells(xml, headerExcelRow, excStart, exceptionRows, rowsToRemove, summaryTable, newSummaryTotals, hdrSi, dataSi) {
+  const lastNewColLetter = colLetter(excStart + 4);
+
+  // Set column widths for the 4 EXC columns (1-based)
+  const excColMin = excStart + 1;
+  const excColMax = excStart + 4;
+  const newCol = `<col min="${excColMin}" max="${excColMax}" width="52" customWidth="1"/>`;
+  if (/<cols[\s>]/.test(xml)) {
+    xml = xml.replace('</cols>', newCol + '</cols>');
+  } else {
+    xml = xml.replace(/(<sheetData[\s>])/, `<cols>${newCol}</cols>$1`);
+  }
+
+  // Extend dimension ref to cover new exception columns
+  xml = xml.replace(/(<dimension\s+ref="[A-Z]+\d+:)[A-Z]+(\d+"[^/]*\/>)/,
+    `$1${lastNewColLetter}$2`);
+
+  const parts  = xml.split('</row>');
+  const result = new Array(parts.length);
+  let removedSoFar = 0;
+
+  const summaryByRow = {};
+  if (summaryTable) {
+    for (const [accrueType, info] of Object.entries(summaryTable))
+      summaryByRow[info.excelRow] = { accrueType, info };
+  }
+
+  for (let i = 0; i < parts.length - 1; i++) {
+    let part = parts[i];
+    const m  = part.match(/<row[^>]*\sr="(\d+)"/);
+    if (!m) { result[i] = part + '</row>'; continue; }
+
+    const rn = parseInt(m[1], 10);
+
+    if (rowsToRemove && rowsToRemove.has(rn)) {
+      result[i] = '';
+      removedSoFar++;
+      continue;
+    }
+
+    const newRn = rn - removedSoFar;
+    if (newRn !== rn) {
+      part = part.replace(/(<row\b[^>]*?\sr=")(\d+)(")/g, `$1${newRn}$3`);
+      part = part.replace(/\br="([A-Z]+)\d+"/g, (_, cols) => `r="${cols}${newRn}"`);
+    }
+
+    let newCells = '';
+
+    if (summaryByRow[rn] && newSummaryTotals) {
+      const { accrueType, info } = summaryByRow[rn];
+      const totals = newSummaryTotals[accrueType];
+      if (totals) {
+        if (info.amountCol >= 0) {
+          const amtRef = colLetter(info.amountCol + 1) + newRn;
+          part = part.replace(
+            new RegExp(`(<c\\b[^>]*?\\sr="${amtRef}"[^>]*>(?:<f>[^<]*</f>)?)<v>[^<]*</v>`),
+            `$1<v>${totals.amount.toFixed(2)}</v>`
+          );
+        }
+        if (info.shipmentsCol >= 0) {
+          const shipRef = colLetter(info.shipmentsCol + 1) + newRn;
+          part = part.replace(
+            new RegExp(`(<c\\b[^>]*?\\sr="${shipRef}"[^>]*>(?:<f>[^<]*</f>)?)<v>[^<]*</v>`),
+            `$1<v>${Math.round(totals.shipments)}</v>`
+          );
+        }
+      }
+    }
+
+    if (rn === headerExcelRow) {
+      const headers = ['EXC: Flag','EXC: Type(s)','EXC: Detail','EXC: Suggested Action'];
+      const hdrAttr = hdrSi != null ? ` s="${hdrSi}"` : '';
+      newCells = headers.map((h, j) =>
+        `<c r="${colLetter(excStart+1+j)}${newRn}" t="str"${hdrAttr}><v>${xesc(h)}</v></c>`
+      ).join('');
+    } else if (exceptionRows[rn]) {
+      const e = exceptionRows[rn];
+      const dataAttr = dataSi != null ? ` s="${dataSi}"` : '';
+      newCells = [e.flag, e.types, e.detail, e.action].map((v, j) =>
+        `<c r="${colLetter(excStart+1+j)}${newRn}" t="str"${dataAttr}><v>${xesc(v)}</v></c>`
+      ).join('');
+    }
+
+    result[i] = part + newCells + '</row>';
+  }
+  result[parts.length - 1] = parts[parts.length - 1];
+  return result.join('');
+}
+
+// Convert 1-based column number to Excel column letters
+function colLetter(n) {
+  let s = '';
+  while (n > 0) { const r=(n-1)%26; s=String.fromCharCode(65+r)+s; n=Math.floor((n-1)/26); }
+  return s;
+}
+
+// XML-escape special characters
+function xesc(s) {
+  return String(s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&apos;');
+}
+
+// ══════════════════════════════════════════════════════════════
+// Formatting helpers
+// ══════════════════════════════════════════════════════════════
+const N = v => Number(v).toLocaleString();
+const P = v => v!==1?'s':'';
+function fmtDate(d) {
+  if (!(d instanceof Date)) return String(d);
+  return d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
+}
+function fmtAmt(v) {
+  return Number(v).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+}
+
+// ══════════════════════════════════════════════════════════════
+// Interactive exception table
+// ══════════════════════════════════════════════════════════════
+let activeExcFilter = null;
+
+const EXC_TYPE_GROUPS = {
+  ACCRUE_CONFLICT:        ['ACCRUE_INVOICED_CONFLICT'],
+  FAILED_MATCH:           ['FAILED_MATCH'],
+  STATUS_INVOICE_MISMATCH:['STATUS_INVOICE_MISMATCH'],
+  INVOICED_MISSING_TMS:   ['INVOICED_MISSING_TMS'],
+  STATUS_DATE_MISMATCH:   ['STATUS_DATE_MISMATCH'],
+  DUPLICATE:              ['TRUE_DUPLICATE','POSSIBLE_DUPLICATE','MULTI_INVOICE'],
+  UNDER_ACCRUAL:          ['UNDER_ACCRUAL'],
+};
+
+const EXC_LABELS = {
+  ACCRUE_CONFLICT:         'Accrue / Invoice Conflict',
+  FAILED_MATCH:            'Failed File Match',
+  STATUS_INVOICE_MISMATCH: 'Invoiced / Non-DELIVERED Status',
+  INVOICED_MISSING_TMS:    'Invoiced / No TMS Data',
+  STATUS_DATE_MISMATCH:    'Status / Date Mismatch',
+  DUPLICATE:               'Duplicate Reference Rows',
+  UNDER_ACCRUAL:           'Prior-Month Under-Accruals',
+};
+
+function filterExceptions(filterKey) {
+  if (!lastAnalysis || !lastAnalysis.exceptionData) return;
+
+  if (activeExcFilter === filterKey) {
+    activeExcFilter = null;
+    document.getElementById('excTableSection').style.display = 'none';
+    document.querySelectorAll('[data-filter]').forEach(el => el.classList.remove('active'));
+    return;
+  }
+
+  activeExcFilter = filterKey;
+  document.querySelectorAll('[data-filter]').forEach(el =>
+    el.classList.toggle('active', el.dataset.filter === filterKey)
+  );
+
+  const types = EXC_TYPE_GROUPS[filterKey] || null;
+  const rows  = lastAnalysis.exceptionData.filter(row =>
+    !types || row.excTypes.some(t => types.includes(t))
+  );
+
+  renderExcTable(rows, filterKey);
+}
+
+function renderExcTable(rows, filterKey) {
+  const section = document.getElementById('excTableSection');
+  const label   = EXC_LABELS[filterKey] || filterKey;
+
+  document.getElementById('excTableTitle').textContent =
+    label + ' — ' + rows.length + ' row' + (rows.length !== 1 ? 's' : '');
+  document.getElementById('excTableMeta').textContent =
+    loaded.cur ? loaded.cur.name : '';
+
+  const COLS = [
+    {key:'excelRow',  hdr:'Row #'},
+    {key:'accrue',    hdr:'Accrue'},
+    {key:'tmsStatus', hdr:'TMS Status'},
+    {key:'tmsPickup', hdr:'TMS Pickup'},
+    {key:'tmsDlv',    hdr:'TMS Delivery'},
+    {key:'amount',    hdr:'Amount',    amt:true},
+    {key:'tmsRef',    hdr:'TMS Primary Ref'},
+    {key:'tiBOL',     hdr:'TI BOL'},
+    {key:'tiPO',      hdr:'TI PO'},
+    {key:'tiInv',     hdr:'TI Invoice #'},
+    {key:'excTypes',  hdr:'Exception Type(s)', type:true},
+    {key:'excDetail', hdr:'Detail', detail:true},
+  ];
+
+  document.getElementById('excTableHead').innerHTML =
+    '<tr>' + COLS.map(c=>`<th>${c.hdr}</th>`).join('') + '</tr>';
+
+  if (rows.length === 0) {
+    document.getElementById('excTableBody').innerHTML =
+      `<tr><td colspan="${COLS.length}" class="exc-empty">No rows match this filter.</td></tr>`;
+  } else {
+    document.getElementById('excTableBody').innerHTML = rows.map(row =>
+      '<tr>' + COLS.map(c => {
+        let v = row[c.key];
+        if (c.type)   return `<td class="type-cell">${Array.isArray(v)?v.join('<br>'):v}</td>`;
+        if (c.detail) return `<td class="detail-cell">${v||''}</td>`;
+        if (c.amt)    return `<td class="amt-cell">${v!=null?'$'+fmtAmt(v):''}</td>`;
+        return `<td>${v!=null?v:''}</td>`;
+      }).join('') + '</tr>'
+    ).join('');
+  }
+
+  section.style.display = 'block';
+  setTimeout(() => section.scrollIntoView({behavior:'smooth', block:'start'}), 50);
+}
+
+function exportExcCSV() {
+  if (!lastAnalysis || !lastAnalysis.exceptionData) return;
+  const types = activeExcFilter ? (EXC_TYPE_GROUPS[activeExcFilter]||null) : null;
+  const rows  = lastAnalysis.exceptionData.filter(row =>
+    !types || row.excTypes.some(t => types.includes(t))
+  );
+
+  const headers = ['Row #','Accrue','TMS Status','TMS Pickup','TMS Delivery',
+    'Amount','TMS Primary Ref','TI BOL','TI PO','TI Invoice #',
+    'Exception Type(s)','Detail','Suggested Action'];
+  const esc = v => `"${String(v==null?'':v).replace(/"/g,'""')}"`;
+  const csvLines = [
+    headers.map(esc).join(','),
+    ...rows.map(r => [
+      r.excelRow, r.accrue, r.tmsStatus, r.tmsPickup, r.tmsDlv,
+      r.amount!=null?r.amount:'', r.tmsRef, r.tiBOL, r.tiPO, r.tiInv,
+      r.excTypes.join(' | '), r.excDetail, r.excAction
+    ].map(esc).join(','))
+  ];
+
+  const blob = new Blob([csvLines.join('\r\n')], {type:'text/csv'});
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href = url;
+  a.download = (loaded.cur ? loaded.cur.name.replace(/\.xlsx$/i,'') : 'exceptions')
+    + ' — ' + (EXC_LABELS[activeExcFilter]||'All Exceptions') + '.csv';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// ══════════════════════════════════════════════════════════════
+// Mode toggle
+// ══════════════════════════════════════════════════════════════
+function setMode(mode) {
+  const isBatch = mode === 'batch';
+  document.getElementById('tabSingle').classList.toggle('active', !isBatch);
+  document.getElementById('tabBatch').classList.toggle('active', isBatch);
+  document.getElementById('singleSection').style.display = isBatch ? 'none' : '';
+  document.getElementById('batchSection').style.display  = isBatch ? '' : 'none';
+}
+
+// ══════════════════════════════════════════════════════════════
+// Batch mode
+// ══════════════════════════════════════════════════════════════
+let batchFiles   = [];
+let batchResults = [];
+
+(function wireBatch() {
+  const dz = document.getElementById('batchDZ');
+  const fi = document.getElementById('fi-batch');
+
+  dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('drag'); });
+  dz.addEventListener('dragleave', () => dz.classList.remove('drag'));
+  dz.addEventListener('drop', e => {
+    e.preventDefault(); dz.classList.remove('drag');
+    const files = [...e.dataTransfer.files].filter(f => f.name.toLowerCase().endsWith('.xlsx'));
+    if (files.length) setBatchFiles(files);
+  });
+  fi.addEventListener('change', e => {
+    const files = [...e.target.files].filter(f => f.name.toLowerCase().endsWith('.xlsx'));
+    if (files.length) setBatchFiles(files);
+    fi.value = '';
+  });
+})();
+
+function setBatchFiles(files) {
+  batchFiles = files.sort((a, b) => a.name.localeCompare(b.name));
+  const dz = document.getElementById('batchDZ');
+  dz.classList.add('has-files');
+  document.getElementById('batchDZContent').innerHTML =
+    `<div class="batch-file-count">${batchFiles.length}</div>` +
+    `<h3>${batchFiles.length} file${batchFiles.length !== 1 ? 's' : ''} selected</h3>` +
+    `<p>${batchFiles.map(f => f.name).slice(0, 3).join(', ')}${batchFiles.length > 3 ? ` … +${batchFiles.length - 3} more` : ''}</p>` +
+    `<p class="batch-note" style="margin-top:8px"><span class="bl" onclick="event.stopPropagation();document.getElementById('fi-batch').click()">Change selection</span></p>`;
+  document.getElementById('batchRunBtn').disabled = false;
+  document.getElementById('batchHint').textContent = `${batchFiles.length} file${batchFiles.length !== 1 ? 's' : ''} ready`;
+  document.getElementById('batchResults').style.display = 'none';
+}
+
+async function loadFileRaw(file) {
+  const buf = await file.arrayBuffer();
+  const wb  = XLSX.read(new Uint8Array(buf), { type: 'array', cellDates: true, cellStyles: true });
+  const ws  = wb.Sheets[wb.SheetNames[0]];
+  if (!ws) throw new Error('No worksheets found');
+  const HR = findHeaderRow(ws);
+  if (HR === null) throw new Error('Header row not found');
+  const CM = buildColMap(ws, HR);
+  if (!CM['Accrue']) throw new Error('"Accrue" column not found');
+  return { wb, ws, HR, CM, name: file.name, originalBuffer: buf };
+}
+
+async function buildOutputBlob(analysisResult, fileData) {
+  const { exceptionRows, excStart, rowsToRemove, summaryTable, newSummaryTotals } = analysisResult;
+  const { HR, name, originalBuffer } = fileData;
+  const zip = await JSZip.loadAsync(originalBuffer);
+  const relsXml  = await zip.file('xl/_rels/workbook.xml.rels').async('text');
+  const wsMatch  = relsXml.match(/Type="[^"]*\/worksheet"[^>]*Target="([^"]+)"/);
+  const wsPath   = 'xl/' + (wsMatch ? wsMatch[1] : 'worksheets/sheet1.xml');
+  const { hdrSi, dataSi } = await addExcStyles(zip);
+  const wsXml    = await zip.file(wsPath).async('text');
+  const modXml   = injectExceptionCells(wsXml, HR + 1, excStart, exceptionRows, rowsToRemove, summaryTable, newSummaryTotals, hdrSi, dataSi);
+  zip.file(wsPath, modXml);
+  return zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 6 } });
+}
+
+async function runBatch() {
+  if (!batchFiles.length) return;
+  batchResults = [];
+
+  const runBtn = document.getElementById('batchRunBtn');
+  runBtn.disabled = true;
+  document.getElementById('batchResults').style.display = 'none';
+
+  const prog  = document.getElementById('batchProgress');
+  const bar   = document.getElementById('batchBar');
+  const label = document.getElementById('batchProgressLabel');
+  prog.style.display = 'block';
+
+  const prevCur = loaded.cur;
+  const prevPri = loaded.pri;
+
+  for (let i = 0; i < batchFiles.length; i++) {
+    const file = batchFiles[i];
+    const pct  = Math.round((i / batchFiles.length) * 100);
+    bar.style.width   = pct + '%';
+    label.textContent = `Processing ${i + 1} of ${batchFiles.length} — ${file.name}`;
+
+    try {
+      const fileData = await loadFileRaw(file);
+      loaded.cur = fileData;
+      loaded.pri = null;
+      const analysis = analyze();
+      const blob     = await buildOutputBlob(analysis, fileData);
+      const s        = analysis.stats;
+      const excRows  = s.total - s.clean;
+      const dupes    = s.dup_true + s.dup_poss + s.dup_multi;
+      const info     = s.exc3_si + s.exc3_missing_tms + s.exc4_cancel + s.exc4_date;
+      const outputName = file.name.replace(/\.xlsx$/i, '') + ' — Exceptions Flagged.xlsx';
+      batchResults.push({
+        name: file.name, outputName,
+        total: s.total, removed: s.removed, excRows,
+        conflict: s.exc1_conflict, failMatch: s.exc2_fm,
+        dupes, under: s.under, underAmt: s.under_amt, info,
+        blob, ok: true,
+      });
+    } catch (err) {
+      batchResults.push({ name: file.name, ok: false, error: err.message });
+    }
+  }
+
+  loaded.cur = prevCur;
+  loaded.pri = prevPri;
+
+  bar.style.width   = '100%';
+  label.textContent = `Done — ${batchFiles.length} file${batchFiles.length !== 1 ? 's' : ''} processed`;
+  setTimeout(() => { prog.style.display = 'none'; }, 1200);
+
+  runBtn.disabled = false;
+  renderBatchResults();
+}
+
+function renderBatchResults() {
+  const ok      = batchResults.filter(r => r.ok);
+  const errored = batchResults.filter(r => !r.ok);
+  const totalExcRows  = ok.reduce((s, r) => s + r.excRows, 0);
+  const totalRows     = ok.reduce((s, r) => s + r.total, 0);
+  const totalConflict = ok.reduce((s, r) => s + r.conflict, 0);
+  const totalUnder    = ok.reduce((s, r) => s + r.under, 0);
+  const totalUnderAmt = ok.reduce((s, r) => s + (r.underAmt || 0), 0);
+
+  document.getElementById('batchResultsTitle').textContent =
+    `${batchResults.length} file${batchResults.length !== 1 ? 's' : ''} analyzed — ${N(totalExcRows)} exception rows across ${N(totalRows)} total rows`;
+
+  const pills = [];
+  if (totalConflict > 0) pills.push(`<span class="bpill bpill-red">${N(totalConflict)} Conflicts</span>`);
+  if (totalUnder    > 0) pills.push(`<span class="bpill bpill-red">${N(totalUnder)} Under-Accruals ($${fmtAmt(totalUnderAmt)})</span>`);
+  if (errored.length > 0) pills.push(`<span class="bpill bpill-gray">${errored.length} file${errored.length !== 1 ? 's' : ''} failed to parse</span>`);
+  if (totalExcRows  === 0 && ok.length > 0) pills.push(`<span class="bpill bpill-clean">All files clean</span>`);
+  document.getElementById('batchSummaryPills').innerHTML = pills.join('');
+
+  // Sort: files with most critical exceptions first
+  const sorted = [...batchResults].sort((a, b) => {
+    if (!a.ok && !b.ok) return 0;
+    if (!a.ok) return 1;
+    if (!b.ok) return -1;
+    const critA = a.conflict + a.failMatch + a.dupes + a.under;
+    const critB = b.conflict + b.failMatch + b.dupes + b.under;
+    return critB - critA || b.excRows - a.excRows;
+  });
+
+  const tbody = document.getElementById('batchTbody');
+  tbody.innerHTML = sorted.map(r => {
+    if (!r.ok) {
+      return `<tr class="row-error">
+        <td class="fname" title="${r.name}">${r.name}</td>
+        <td colspan="8" style="text-align:left;color:#ef4444">⚠ Parse error: ${r.error}</td>
+        <td class="cell-dl">—</td>
+      </tr>`;
+    }
+    const c  = (n, cls) => `<td class="${n > 0 ? cls : 'cell-zero'}">${n > 0 ? N(n) : '—'}</td>`;
+    const url  = URL.createObjectURL(r.blob);
+    const dlBtn = `<a class="btn-dl-row${r.excRows === 0 ? ' no-exc' : ''}" href="${url}" download="${r.outputName}">⬇ ${r.excRows === 0 ? 'Clean' : 'Report'}</a>`;
+    return `<tr>
+      <td class="fname" title="${r.name}">${r.name}</td>
+      <td>${N(r.total)}</td>
+      ${c(r.removed, 'cell-info')}
+      ${c(r.excRows,  r.excRows  > 0 ? 'cell-crit' : 'cell-zero')}
+      ${c(r.conflict, 'cell-crit')}
+      ${c(r.failMatch,'cell-crit')}
+      ${c(r.dupes,    'cell-crit')}
+      <td class="${r.under > 0 ? 'cell-crit' : 'cell-zero'}">${r.under > 0 ? `${N(r.under)} ($${fmtAmt(r.underAmt)})` : '—'}</td>
+      ${c(r.info, 'cell-info')}
+      <td class="cell-dl">${dlBtn}</td>
+    </tr>`;
+  }).join('');
+
+  document.getElementById('batchResults').style.display = 'block';
+}
+
+async function downloadBatchZip() {
+  const btn = document.getElementById('batchDlAllBtn');
+  btn.textContent = '⏳ Building ZIP…';
+  btn.disabled = true;
+  try {
+    const zip = new JSZip();
+    for (const r of batchResults) {
+      if (r.ok && r.blob) zip.file(r.outputName, r.blob);
+    }
+    const zblob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 6 } });
+    const url = URL.createObjectURL(zblob);
+    const a   = document.createElement('a');
+    a.href = url; a.download = 'Accrual Exception Reports.zip'; a.click();
+    URL.revokeObjectURL(url);
+  } finally {
+    btn.textContent = '⬇ Download All Reports (.zip)';
+    btn.disabled = false;
+  }
+}
+
+// ── SOP / Help Modal ──────────────────────────────────
+function openSOP()  {
+  document.getElementById('sopOverlay').classList.add('open');
+  document.body.style.overflow = 'hidden';
+}
+function closeSOP() {
+  document.getElementById('sopOverlay').classList.remove('open');
+  document.body.style.overflow = '';
+}
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeSOP(); });
+</script>
+
+<!-- ── SOP / Help Modal ── -->
+<div class="sop-overlay" id="sopOverlay" onclick="if(event.target===this)closeSOP()">
+  <div class="sop-modal">
+
+    <div class="sop-header">
+      <div>
+        <h2>Accrual Exception Analyzer — User Guide</h2>
+        <p>Standard Operating Procedure &nbsp;·&nbsp; Transportation Insight</p>
+      </div>
+      <button class="sop-close" onclick="closeSOP()" title="Close">&#x2715;</button>
+    </div>
+
+    <div class="sop-body">
+
+      <!-- Section 1: What This Tool Does -->
+      <div class="sop-section">
+        <h3>What This Tool Does</h3>
+        <p>The Accrual Exception Analyzer reviews your monthly TI freight accrual file and automatically identifies rows with data quality issues, billing conflicts, or financial exposure. Instead of manually comparing rows across thousands of lines, the tool runs a structured set of checks in seconds and produces an annotated Excel output with exception columns added to every flagged row — so issues can be actioned quickly or escalated to the right team.</p>
+        <p><strong>Key outcomes the tool delivers:</strong></p>
+        <p>
+          &bull; Catches billing conflicts before month-end close — same shipment appearing as both Accruing and Invoiced<br>
+          &bull; Quantifies financial exposure from unaccrued freight costs (prior-month under-accruals)<br>
+          &bull; Flags duplicate or multi-invoice billing anomalies that may represent double charges<br>
+          &bull; Surfaces TMS data quality gaps — stale statuses, missing TMS records, cancelled loads still accruing<br>
+          &bull; Preserves 100% of the original file formatting and layout in the downloaded output
+        </p>
+        <div class="sop-tip">All processing happens in your browser. Your accrual file is never uploaded to a server or transmitted outside your machine.</div>
+      </div>
+
+      <!-- Section 2: How To Use -->
+      <div class="sop-section">
+        <h3>How To Use — Single File Mode</h3>
+        <ol class="sop-steps">
+          <li>
+            <div class="sop-step-num">1</div>
+            <div class="sop-step-body">
+              <strong>Load the current month accrual file</strong>
+              <span>Drag and drop your current month <code>.xlsx</code> file onto the <em>Current Month Accrual</em> drop zone, or click it to browse for the file. The tool automatically detects the header row and maps all columns — no configuration required.</span>
+            </div>
+          </li>
+          <li>
+            <div class="sop-step-num">2</div>
+            <div class="sop-step-body">
+              <strong>Load the prior month file (optional — enables Under-Accrual detection)</strong>
+              <span>Drop last month's accrual file into the <em>Prior Month Accrual</em> zone. This allows the tool to compare current-month invoices against prior-month accruing rows and identify freight costs that were never accrued in the month they were incurred. Without this file, under-accrual checks are skipped entirely.</span>
+            </div>
+          </li>
+          <li>
+            <div class="sop-step-num">3</div>
+            <div class="sop-step-body">
+              <strong>Click "Run Analysis"</strong>
+              <span>The tool scans every row through a multi-pass exception pipeline. For typical accrual files (a few thousand rows) this completes in under one second.</span>
+            </div>
+          </li>
+          <li>
+            <div class="sop-step-num">4</div>
+            <div class="sop-step-body">
+              <strong>Review the exception dashboard</strong>
+              <span>Summary tiles show row counts for each exception type. <strong style="color:#c0392b">Red tiles</strong> indicate financial impact — conflicts, duplicates, under-accruals. <strong style="color:#6b7280">Gray tiles</strong> are informational only (TMS data quality, stale statuses). Click any tile to open a filtered detail table showing only those rows. Use <em>Export CSV</em> to save a filtered list for follow-up or documentation.</span>
+            </div>
+          </li>
+          <li>
+            <div class="sop-step-num">5</div>
+            <div class="sop-step-body">
+              <strong>Download the flagged report</strong>
+              <span>Click <em>Download Flagged Report</em> to receive the original file with 4 exception columns appended to the right: <code>EXC: Flag</code>, <code>EXC: Type(s)</code>, <code>EXC: Detail</code>, and <code>EXC: Suggested Action</code>. These columns have red headers for easy identification. <strong>Remove the EXC columns before sending the file to a client.</strong></span>
+            </div>
+          </li>
+        </ol>
+        <div class="sop-tip"><strong>Batch Mode:</strong> Use the <em>Batch Mode</em> tab to process multiple accrual files at once. Drop a folder or select multiple <code>.xlsx</code> files. Each file is analyzed independently and results appear in a summary table sorted by most critical issues. Download individual reports or all files together as a single ZIP archive. Note: prior-month under-accrual detection is not available in batch mode.</div>
+      </div>
+
+      <!-- Section 3: Exception Reference -->
+      <div class="sop-section">
+        <h3>Exception Reference</h3>
+        <table class="sop-exc-table">
+          <thead>
+            <tr>
+              <th style="width:22%">Exception</th>
+              <th style="width:11%">Severity</th>
+              <th style="width:39%">What It Means</th>
+              <th style="width:28%">Recommended Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>ACCRUE_INVOICED_CONFLICT</td>
+              <td><span class="sop-badge badge-crit">Critical</span></td>
+              <td>The same TMS Pro Number appears as both Accruing and Invoiced in the same file. The shipment was invoiced in the billing platform but the Accruing copy was not removed — a file match failure causing double-counting in the accrual.</td>
+              <td>Remove the Accruing row from the accrual. Investigate the billing platform for the file match failure on this TMS Pro Number.</td>
+            </tr>
+            <tr>
+              <td>FAILED_MATCH</td>
+              <td><span class="sop-badge badge-crit">Critical</span></td>
+              <td>A TMS Primary Reference on an Accruing row matches a TI BOL Number on an Invoiced Only row. The invoice was processed but the file match never linked the TMS record, leaving the shipment incorrectly accruing.</td>
+              <td>Manually link the TMS record to the invoice. Reclassify the row from Accruing to Invoiced.</td>
+            </tr>
+            <tr>
+              <td>TRUE_DUPLICATE</td>
+              <td><span class="sop-badge badge-crit">Critical</span></td>
+              <td>The same invoice number appears more than once on the same reference field — the identical charge has been billed twice on one invoice.</td>
+              <td>Review and void the duplicate invoice entry.</td>
+            </tr>
+            <tr>
+              <td>POSSIBLE_DUPLICATE</td>
+              <td><span class="sop-badge badge-crit">Critical</span></td>
+              <td>The same dollar amount appears on different invoice numbers for the same reference. May represent duplicate billing under a reissued invoice number.</td>
+              <td>Verify whether this is a duplicate charge or a separate legitimate invoice.</td>
+            </tr>
+            <tr>
+              <td>MULTI_INVOICE</td>
+              <td><span class="sop-badge badge-crit">Critical</span></td>
+              <td>Multiple invoices share the same reference with differing amounts, or a row has Shipments=0 (indicating an accessorial or balance-due charge). Requires confirmation that all charges are intentional.</td>
+              <td>Confirm all charges are legitimate — accessorial fees, balance-due adjustments, etc.</td>
+            </tr>
+            <tr>
+              <td>UNDER_ACCRUAL</td>
+              <td><span class="sop-badge badge-crit">Critical</span></td>
+              <td>A row invoiced in the current month has a TI Pickup Date in a prior month, and no matching record was found as Accruing in the prior month accrual file. This freight cost was never accrued in the month it was incurred — a prior-period financial exposure. Requires the prior month file to be loaded.</td>
+              <td>Record as a prior-period under-accrual. Adjust prior-month financials if the amount is material.</td>
+            </tr>
+            <tr>
+              <td>STATUS_INVOICE_MISMATCH</td>
+              <td><span class="sop-badge badge-info">Informational</span></td>
+              <td>An Invoiced row where TMS status has not progressed to DELIVERED. Since an invoice requires a signed BOL (proof of delivery), these TMS records are stale. No direct financial impact — this reflects a TMS maintenance gap only.</td>
+              <td>Update TMS status to DELIVERED.</td>
+            </tr>
+            <tr>
+              <td>INVOICED_MISSING_TMS</td>
+              <td><span class="sop-badge badge-info">Informational</span></td>
+              <td>An Invoiced row with all TMS fields blank — billing data exists but no TMS record is visible in the report. The physical match did occur; the TMS record is simply not surfacing in the accrual export.</td>
+              <td>Locate the TMS record and investigate why it is not appearing in the accrual export.</td>
+            </tr>
+            <tr>
+              <td>STATUS_DATE_MISMATCH</td>
+              <td><span class="sop-badge badge-info">Informational</span></td>
+              <td>A row with a past pickup or scheduled delivery date whose TMS status has not progressed (e.g., still BOOKED weeks after pickup). Also flags CANCELLED loads that remain in Accruing status — cancelled shipments should not carry an accrual balance.</td>
+              <td>Verify shipment movement and update TMS status. Remove CANCELLED loads from the accrual.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+    </div><!-- /.sop-body -->
+  </div><!-- /.sop-modal -->
+</div><!-- /.sop-overlay -->
+
+</body>
+</html>
