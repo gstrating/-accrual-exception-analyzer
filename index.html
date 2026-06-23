@@ -482,6 +482,40 @@
     }
     .badge-crit  { background: #fdecea; color: #c0392b; }
     .badge-info  { background: #f0f3f7; color: #6b7280; }
+
+    /* ── PDF download button (inside modal header) ──────── */
+    .sop-pdf-btn {
+      background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.25);
+      color: rgba(255,255,255,0.75); font-size: 12px; font-weight: 600;
+      padding: 6px 14px; border-radius: 5px; cursor: pointer;
+      font-family: 'IBM Plex Sans', sans-serif;
+      transition: background 0.15s; white-space: nowrap;
+    }
+    .sop-pdf-btn:hover { background: rgba(255,255,255,0.2); color: white; }
+
+    /* ── Print / PDF layout ─────────────────────────────── */
+    @media print {
+      /* Hide the entire page except the open SOP modal */
+      body > * { display: none !important; }
+      body > .sop-overlay.open {
+        display: block !important; position: static !important;
+        background: white !important; padding: 0 !important;
+        overflow: visible !important;
+      }
+      .sop-modal {
+        max-width: 100% !important; box-shadow: none !important;
+        border-radius: 0 !important;
+      }
+      /* Hide interactive buttons on print */
+      .sop-close, .sop-pdf-btn { display: none !important; }
+      /* Preserve background colors for header, badges, table headers, step numbers */
+      .sop-header, .sop-exc-table th, .sop-badge, .sop-step-num {
+        -webkit-print-color-adjust: exact; print-color-adjust: exact;
+      }
+      /* Avoid splitting sections and tip boxes mid-page */
+      .sop-section { break-inside: avoid; page-break-inside: avoid; }
+      .sop-tip     { break-inside: avoid; page-break-inside: avoid; }
+    }
   </style>
 </head>
 <body>
@@ -1789,6 +1823,7 @@ async function downloadBatchZip() {
 }
 
 // ── SOP / Help Modal ──────────────────────────────────
+function downloadSopPdf() { window.print(); }
 function openSOP()  {
   document.getElementById('sopOverlay').classList.add('open');
   document.body.style.overflow = 'hidden';
@@ -1809,7 +1844,10 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') closeSOP(); 
         <h2>Accrual Exception Analyzer — User Guide</h2>
         <p>Standard Operating Procedure &nbsp;·&nbsp; Transportation Insight</p>
       </div>
-      <button class="sop-close" onclick="closeSOP()" title="Close">&#x2715;</button>
+      <div style="display:flex;gap:8px;align-items:center;flex-shrink:0">
+        <button class="sop-pdf-btn" onclick="downloadSopPdf()">&#x2B07; Download PDF</button>
+        <button class="sop-close" onclick="closeSOP()" title="Close">&#x2715;</button>
+      </div>
     </div>
 
     <div class="sop-body">
